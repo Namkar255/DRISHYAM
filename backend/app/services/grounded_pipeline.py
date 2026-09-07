@@ -179,6 +179,10 @@ def _upsert_record(db: Session, evidence: EvidenceFile, outcome: RoutingOutcome)
     record.phone_numbers = draft.phone_numbers
     record.email_addresses = draft.email_addresses
     record.account_identifiers = draft.account_identifiers
+    record.vehicle_identifiers = draft.vehicle_identifiers
+    record.organisation_names = draft.organisation_names
+    record.person_names = draft.person_names
+    record.location_names = draft.location_names
     record.transaction_reference = draft.transaction_reference
     record.amount_value = draft.amount.value
     record.amount_currency = draft.amount.currency

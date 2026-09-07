@@ -675,6 +675,11 @@ class NormalizedRecord(Base):
     phone_numbers: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     email_addresses: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     account_identifiers: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # SIH26189 entity classes. JSON lists to match the identifier columns above.
+    vehicle_identifiers: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    organisation_names: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    person_names: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    location_names: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     transaction_reference: Mapped[str | None] = mapped_column(String(160), index=True)
     amount_value: Mapped[float | None] = mapped_column(Numeric(16, 2))
     amount_currency: Mapped[str | None] = mapped_column(String(8))
