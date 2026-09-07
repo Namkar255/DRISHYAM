@@ -28,7 +28,14 @@ def _case(client, headers: dict[str, str], title: str) -> dict:
     response = client.post(
         "/api/v1/cases",
         headers=headers,
-        json={"title": title, "crime_type": "synthetic_cross_case_test", "priority": Priority.HIGH.value},
+        json={
+            "title": title,
+            "crime_type": "synthetic_cross_case_test",
+            # A description is mandatory on case creation; see
+            # test_case_description.py. This helper predates that rule.
+            "description": f"Synthetic cross-case authorization fixture for {title}. Contains no real evidence.",
+            "priority": Priority.HIGH.value,
+        },
     )
     assert response.status_code == 201, response.text
     return response.json()
