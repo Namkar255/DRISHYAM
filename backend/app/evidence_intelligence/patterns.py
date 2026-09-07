@@ -150,8 +150,21 @@ def normalize_identifier(entity_type: str, value: str) -> str:
     return value
 
 
+# People write a mobile number in groups far more often than as ten unbroken
+# digits -- "98765 43210" on an FIR, "+91-98765-43210" in a signature block.
+# PHONE_PATTERN requires the ten digits to be adjacent, so every grouped
+# number was invisible to the extractor and never became a node. Only the two
+# groupings actually in use are accepted; a permissive rule would weld together
+# two unrelated numbers sitting in adjacent table cells.
+PHONE_GROUPED_PATTERN = re.compile(
+    r"(?<!\d)(?:\+?91[\s-]?)?(?:[6-9]\d{4}[\s-]\d{5}|[6-9]\d{2}[\s-]\d{3}[\s-]\d{4})(?!\d)"
+)
+
+
 def find_phone_numbers(text: str) -> list[str]:
-    return sorted({normalize_phone(match.group(0)) for match in PHONE_PATTERN.finditer(text)})
+    found = {normalize_phone(match.group(0)) for match in PHONE_PATTERN.finditer(text)}
+    found |= {normalize_phone(match.group(0)) for match in PHONE_GROUPED_PATTERN.finditer(text)}
+    return sorted(found)
 
 
 def find_email_addresses(text: str) -> list[str]:
@@ -190,7 +203,7 @@ def _protected_spans(text: str) -> list[tuple[int, int]]:
     Without this, the digits inside `HDFC0012345678` or `12 Mar 2024` get read as rupee values.
     """
     spans: list[tuple[int, int]] = []
-    for pattern in (PHONE_PATTERN, UTR_PATTERN, ACCOUNT_PATTERN, IFSC_PATTERN, EMAIL_PATTERN, UPI_PATTERN, URL_PATTERN, DEVICE_PATTERN, *DATE_PATTERNS):
+    for pattern in (PHONE_PATTERN, PHONE_GROUPED_PATTERN, UTR_PATTERN, ACCOUNT_PATTERN, IFSC_PATTERN, EMAIL_PATTERN, UPI_PATTERN, URL_PATTERN, DEVICE_PATTERN, *DATE_PATTERNS):
         spans.extend((match.start(), match.end()) for match in pattern.finditer(text))
     for match in GROUPED_DIGITS_PATTERN.finditer(text):
         if sum(character.isdigit() for character in match.group(0)) >= 10:
@@ -302,3 +315,188 @@ def find_timestamp(text: str, *, context: str | None = None) -> tuple[datetime |
                 continue
             return parsed, raw, precision
     return None, None, "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Criminal-network entity vocabulary (SIH26189)
+#
+# SIH26189 asks for people, locations, vehicles, phone numbers and
+# organisations. Phones and account identifiers are handled above; the three
+# classes below are new.
+#
+# Each one is deliberately conservative. A criminal-network graph is only
+# useful if its nodes are real, and a false node is worse than a missing one:
+# it invents a connection between two files that share nothing. So none of
+# these extractors guess from shape alone -- a vehicle needs a real state
+# code, an organisation needs a legal-form suffix, and a location needs an
+# explicit marker naming it as a place.
+# ---------------------------------------------------------------------------
+
+# Registration-plate state and UT codes. Validating against this list is what
+# separates "MH 12 DE 1433" from four characters that merely look like a plate.
+VEHICLE_STATE_CODES = frozenset(
+    """AN AP AR AS BR CG CH DD DL DN GA GJ HP HR JH JK KA KL LA LD MH ML MN MP
+       MZ NL OD OR PB PY RJ SK TN TR TS UA UK UP WB""".split()
+)
+
+# MH12DE1433 / MH 12 DE 1433 / MH-12-DE-1433 / DL-8C-AB-1234
+# The RTO code carries a trailing letter in several regions -- Delhi writes
+# DL 8C AB 1234 -- so the digits may be followed by one.
+VEHICLE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?P<state>[A-Za-z]{2})[\s-]?(?P<rto>\d{1,2}[A-Za-z]?)[\s-]?(?P<series>[A-Za-z]{1,3})[\s-]?(?P<number>\d{4})(?![A-Za-z0-9])"
+)
+# Bharat series: 22 BH 1234 AB
+VEHICLE_BH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?P<year>\d{2})[\s-]?(?P<bh>BH)[\s-]?(?P<number>\d{4})[\s-]?(?P<series>[A-Za-z]{1,2})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def normalize_vehicle(value: str) -> str:
+    """One plate, one spelling. Spacing and hyphens vary with whoever typed it."""
+    return re.sub(r"[^A-Za-z0-9]", "", value).upper()
+
+
+def find_vehicle_identifiers(text: str) -> list[str]:
+    """Registration plates literally present in the text.
+
+    An IFSC code such as HDFC0012345 cannot match: the boundary guards refuse a
+    partial read of a longer alphanumeric run, and the state code must be real.
+    """
+    found: set[str] = set()
+    for match in VEHICLE_PATTERN.finditer(text):
+        if match.group("state").upper() in VEHICLE_STATE_CODES:
+            found.add(normalize_vehicle(match.group(0)))
+    for match in VEHICLE_BH_PATTERN.finditer(text):
+        found.add(normalize_vehicle(match.group(0)))
+    return sorted(found)
+
+
+# Two different kinds of trailing word, kept apart on purpose.
+#
+# A *legal form* is not identity. "Shreeji Traders" and "Shreeji Traders Pvt.
+# Ltd." are one counterparty written two ways, so the legal form is stripped
+# before comparison or the node splits in half.
+_ORG_LEGAL_FORM = r"(?:Pvt\.?\s*Ltd\.?|Private\s+Limited|Public\s+Limited|Ltd\.?|Limited|LLP|Corporation|Corp\.?|Inc\.?)"
+
+# A *descriptor* is identity. Stripping it would fold "Acme Motors" and "Acme
+# Traders" into one node -- inventing a link between two separate businesses.
+# A false merge is worse than a split, so these survive normalisation.
+_ORG_DESCRIPTOR = (
+    r"(?:Bank|Enterprises?|Traders?|Trading\s+Co\.?|Industries|Technologies|Techno|"
+    r"Solutions|Services|Associates|Agency|Agencies|Motors|Logistics|Transports?|"
+    r"Builders|Constructions?|Infra|Finance|Capital|Foundation|Trust|Society|"
+    r"&\s*Sons|and\s+Sons)"
+)
+_ORG_SUFFIX = rf"(?:{_ORG_DESCRIPTOR}|{_ORG_LEGAL_FORM})"
+
+# An optional "of <Place>" tail keeps "State Bank of India" whole rather than
+# truncating it to "State Bank" at the suffix.
+ORGANISATION_PATTERN = re.compile(
+    rf"\b(?P<name>(?:[A-Z][A-Za-z&.\-]{{1,20}}\s+){{0,3}}[A-Z][A-Za-z&.\-]{{1,20}}"
+    rf"\s+{_ORG_SUFFIX}"
+    rf"(?:\s+of\s+[A-Z][A-Za-z]{{1,20}}(?:\s+[A-Z][A-Za-z]{{1,20}}){{0,2}})?"
+    rf"(?:\s+{_ORG_LEGAL_FORM})?)(?![A-Za-z])"
+)
+
+
+def normalize_organisation(value: str) -> str:
+    """Fold to a comparison key. Legal form and punctuation are not identity."""
+    folded = value.strip()
+    # Repeat: "Pvt. Ltd." is two forms stacked, and one pass would leave "pvt".
+    while True:
+        stripped = re.sub(rf"[\s,.]+{_ORG_LEGAL_FORM}\s*$", "", folded, flags=re.IGNORECASE)
+        if stripped == folded:
+            break
+        folded = stripped
+    folded = re.sub(r"[^a-z0-9]+", " ", folded.casefold()).strip()
+    return folded or re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def find_organisations(text: str) -> list[str]:
+    return sorted({" ".join(match.group("name").split()) for match in ORGANISATION_PATTERN.finditer(text)})
+
+
+# A place is recognised only where the source labels it as one. Open-domain
+# place-name detection over Indian text produces far more noise than leads and
+# would bury the review queue, so a marker is required.
+_PLACE_WORD = r"[A-Z][A-Za-z]{1,24}"
+_PLACE_PHRASE = rf"{_PLACE_WORD}(?:\s+{_PLACE_WORD}){{0,3}}"
+
+# Each rule says whether the marker sits OUTSIDE the captured name or is part
+# of it. "PS Andheri" names Andheri -- the marker is administrative. "Linking
+# Road" names Linking Road; dropping "Road" there would leave a fragment that
+# is not the name of anywhere.
+LOCATION_RULES: tuple[tuple[re.Pattern[str], bool], ...] = (
+    # PS Andheri  ·  P.S. Andheri East  ·  Police Station Andheri
+    (re.compile(rf"\b(?:P\.?\s?S\.?|Police\s+Station|Thana)\s*[:\-]?\s*(?P<name>{_PLACE_PHRASE})"), True),
+    # Andheri Police Station  ·  Andheri Thana
+    (re.compile(rf"\b(?P<name>{_PLACE_PHRASE})\s+(?:Police\s+Station|Thana)\b"), True),
+    # District Thane  ·  Village Kalwa  ·  Taluka X
+    (re.compile(rf"\b(?:District|Distt\.?|Village|Taluka|Tehsil)\s*[:\-]?\s*(?P<name>{_PLACE_PHRASE})"), True),
+    # Thane District  ·  Kalwa Taluka
+    (re.compile(rf"\b(?P<name>{_PLACE_PHRASE})\s+(?:District|Taluka|Tehsil)\b"), True),
+    # Linking Road  ·  Shivaji Nagar  ·  Dadar Chowk  ·  Crawford Market
+    (
+        re.compile(rf"\b(?P<name>{_PLACE_PHRASE}\s+(?:Road|Marg|Nagar|Colony|Chowk|Market|Bazaar|Chowki|Galli|Vihar|Puram|Pura|Ganj))\b"),
+        False,
+    ),
+)
+
+
+def normalize_location(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+# Administrative markers, stripped only from rules that place them outside the
+# name. A greedy phrase can still pull one in from either edge.
+_LOCATION_MARKERS = frozenset("police station thana district distt village taluka tehsil".split())
+
+
+def find_locations(text: str) -> list[str]:
+    """Places the source explicitly marks as places."""
+    found: set[str] = set()
+    for rule, strip_markers in LOCATION_RULES:
+        for match in rule.finditer(text):
+            words = match.group("name").split()
+            if strip_markers:
+                while words and words[0].casefold().rstrip(".") in _LOCATION_MARKERS:
+                    words.pop(0)
+                while words and words[-1].casefold().rstrip(".") in _LOCATION_MARKERS:
+                    words.pop()
+            name = " ".join(words)
+            if len(normalize_location(name)) >= 3:
+                found.add(name)
+    return sorted(found)
+
+
+# Names carry no shape of their own, so a person is read only where the source
+# labels the role. Detecting capitalised word runs as names would turn every
+# heading and place into a person.
+PERSON_LABEL_PATTERN = re.compile(
+    r"\b(?:Name|Full\s+Name|Complainant|Complaint\s+By|Accused|Victim|Informant|Witness|"
+    r"Beneficiary|Sender|Receiver|Recipient|Payee|Payer|Driver|Owner|Applicant|Suspect|From|To)"
+    r"\s*(?:\([^)]{1,20}\))?\s*[:\-]\s*(?P<name>[A-Z][A-Za-z.]{1,20}(?:\s+[A-Z][A-Za-z.]{1,20}){0,3})"
+)
+# Indian records name a parent or spouse to disambiguate: "Ravi Kumar S/o Mohan Lal".
+PERSON_RELATION_PATTERN = re.compile(
+    r"\b[SDWsdw]\s?/\s?[Oo]\.?\s*(?P<name>[A-Z][A-Za-z.]{1,20}(?:\s+[A-Z][A-Za-z.]{1,20}){0,3})"
+)
+
+
+def normalize_person(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def find_person_names(text: str) -> list[str]:
+    """Names the source attaches to a stated role. Never inferred from capitalisation."""
+    found: set[str] = set()
+    for pattern in (PERSON_LABEL_PATTERN, PERSON_RELATION_PATTERN):
+        for match in pattern.finditer(text):
+            name = " ".join(match.group("name").split()).strip(" .")
+            # A label followed by an email or phone is an identifier, not a name.
+            if EMAIL_PATTERN.search(name) or any(character.isdigit() for character in name):
+                continue
+            if len(normalize_person(name)) >= 3:
+                found.add(name)
+    return sorted(found)

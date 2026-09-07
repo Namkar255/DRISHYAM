@@ -51,7 +51,15 @@ STRUCTURED_SOURCE_TYPES = {
 VISUAL_SOURCE_TYPES = {SourceType.SCREENSHOT, SourceType.IMAGE}
 DEGRADED_FLAGS = {"blurry", "cropped", "incomplete", "low_quality", "ambiguous"}
 
-LIST_FIELDS = ("phone_numbers", "email_addresses", "account_identifiers")
+LIST_FIELDS = (
+    "phone_numbers",
+    "email_addresses",
+    "account_identifiers",
+    "vehicle_identifiers",
+    "organisation_names",
+    "person_names",
+    "location_names",
+)
 
 # Distinguishes "caller passed nothing, build from config" from "caller explicitly wants no model".
 _UNSET: Any = object()

@@ -249,6 +249,21 @@ def _identifier_facts(text: str, reference: SourceReference) -> dict[str, FieldP
         facts["transaction_reference"] = _direct(reference_id, quote=reference_id, reference=reference, confidence=0.95)
     if device := patterns.find_device_identifier(text):
         facts["device_identifier"] = _direct(device, quote=device, reference=reference, confidence=0.92)
+
+    # SIH26189 entity classes. Confidence differs by how much shape the class
+    # actually has: a registration plate is close to unique, an organisation is
+    # a suffix heuristic, and a place name is the weakest reading of the four.
+    if vehicles := patterns.find_vehicle_identifiers(text):
+        facts["vehicle_identifiers"] = _direct(vehicles, quote=", ".join(vehicles), reference=reference, confidence=0.93)
+    if organisations := patterns.find_organisations(text):
+        facts["organisation_names"] = _direct(organisations, quote=", ".join(organisations), reference=reference, confidence=0.80)
+        facts["organisation_names"].reason = "Read from a legal-form or business suffix; the entity behind the name is not established."
+    if people := patterns.find_person_names(text):
+        facts["person_names"] = _direct(people, quote=", ".join(people), reference=reference, confidence=0.75)
+        facts["person_names"].reason = "The source states this role and name. It does not establish that the person is the same individual named elsewhere."
+    if places := patterns.find_locations(text):
+        facts["location_names"] = _direct(places, quote=", ".join(places), reference=reference, confidence=0.65)
+        facts["location_names"].reason = "A place marker names this location. A shared place is weak evidence of a shared party."
     if found := patterns.find_amount_detail(text):
         value, currency, quote, role = found
         facts["amount"] = _direct(

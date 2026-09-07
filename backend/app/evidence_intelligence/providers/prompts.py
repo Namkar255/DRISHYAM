@@ -12,7 +12,7 @@ from typing import Any
 from app.evidence_intelligence.extraction import ExtractionUnit, RawExtraction
 from app.evidence_intelligence.ocr import OCRResult
 
-PROMPT_VERSION = "grounded-normalize-v2"
+PROMPT_VERSION = "grounded-normalize-v3"
 
 SYSTEM_PROMPT = """You are a forensic evidence normalizer for an investigation platform.
 You describe what a piece of evidence shows. You never decide what it means legally.
@@ -40,6 +40,16 @@ ABSOLUTE RULES
 9. Corroboration and contradiction are candidates for a human reviewer, never settled findings.
 10. Set `requires_human_review` to true whenever identity, role, beneficiary, amount or timing is
     unresolved, ambiguous, or the source is blurry, cropped or incomplete.
+11. Record the entity classes below only where the source writes them down. Each is a list of the
+    exact strings visible in the source; leave the list empty when the source shows none.
+    - `vehicle_identifiers`: registration plates, exactly as printed.
+    - `organisation_names`: companies, banks, firms, agencies, departments.
+    - `person_names`: a name the source attaches to a stated role (complainant, accused, sender,
+      beneficiary, driver, owner). A capitalised word is not a name. A place is not a person.
+    - `location_names`: places the source names as places -- a police station, district, village,
+      road, area or landmark.
+    None of these establishes identity. The same name in two sources is a lead for a reviewer to
+    check, never a confirmed match, and you must not merge, correct or complete any of them.
 
 `basis` values: "direct" for text plainly readable in the source, "direct_visual" for a fact the
 layout itself shows (such as a bubble sitting on one side), "inferred" for contextual reading, and
@@ -64,6 +74,8 @@ SHAPE — every material field is an OBJECT, never a bare value. Copy this shape
   "receiver": {"value": null, "basis": "unknown",
                "reason": "No recipient is shown."},
   "phone_numbers": [], "email_addresses": [], "account_identifiers": [],
+  "vehicle_identifiers": [], "organisation_names": [],
+  "person_names": [], "location_names": [],
   "model_confidence": 0.8,
   "requires_human_review": true,
   "review_reason": "<why a person should check this>"
@@ -112,6 +124,10 @@ RESPONSE_SCHEMA: dict[str, Any] = {
         "phone_numbers": {"type": "array", "items": {"type": "string"}},
         "email_addresses": {"type": "array", "items": {"type": "string"}},
         "account_identifiers": {"type": "array", "items": {"type": "string"}},
+        "vehicle_identifiers": {"type": "array", "items": {"type": "string"}},
+        "organisation_names": {"type": "array", "items": {"type": "string"}},
+        "person_names": {"type": "array", "items": {"type": "string"}},
+        "location_names": {"type": "array", "items": {"type": "string"}},
         "transaction_reference": _field_schema(_NULLABLE_STRING),
         "amount": _field_schema(
             {
