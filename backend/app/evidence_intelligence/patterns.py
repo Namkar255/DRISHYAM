@@ -134,6 +134,21 @@ def _line_around(text: str, index: int) -> str:
     return text[start:] if end == -1 else text[start:end]
 
 
+# OCR substitutes a punctuation glyph for the letter it resembles, the same way it does for the
+# rupee sign. "bhej de" on a phone screenshot comes back as "bhe} de", and the money word that
+# makes the digits beside it an amount is then invisible -- so a real payment request was dropped
+# because of one misread character.
+#
+# Only non-alphanumeric glyphs are folded, and only for the context lookup. Digits are never
+# touched, so no value is altered by this: it decides whether a word is a money word, never what
+# a number is worth.
+_OCR_LETTER_LOOKALIKES = str.maketrans({"}": "j", "{": "j", "|": "l", "!": "l", "@": "a", "$": "s"})
+
+
+def _fold_ocr_glyphs(line: str) -> str:
+    return line.translate(_OCR_LETTER_LOOKALIKES)
+
+
 def normalize_phone(value: str) -> str:
     digits = re.sub(r"\D", "", value)
     return "+91" + digits[-10:] if len(digits) >= 10 else value.strip()
@@ -254,7 +269,7 @@ def find_amount_detail(text: str, *, declared_monetary: bool = False) -> tuple[f
             digits = raw_value.replace(",", "").split(".")[0]
             if value < MIN_BARE_AMOUNT or len(digits) > MAX_BARE_AMOUNT_DIGITS:
                 continue
-            if not declared_monetary and not MONEY_CONTEXT_PATTERN.search(_line_around(text, start)):
+            if not declared_monetary and not MONEY_CONTEXT_PATTERN.search(_fold_ocr_glyphs(_line_around(text, start))):
                 # No currency marker and no money word on the line. "SYNTHETIC-ACCOUNT-8233 212,000"
                 # is an account row; calling it a payment invents a transaction the source never
                 # recorded, which is the single worst thing this extractor can do.
