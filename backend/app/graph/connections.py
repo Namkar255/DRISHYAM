@@ -26,15 +26,30 @@ IDENTIFIER_WEIGHT = {
     "reference": 1.00,
     "device": 0.95,
     "account": 0.92,
+    "vehicle": 0.90,  # a registration plate is issued once
     "ifsc": 0.90,
     "upi": 0.90,
     "email": 0.88,
     "phone": 0.85,
+    "organisation": 0.50,  # a trading name is shared and often abbreviated
     "party": 0.45,
+    "person": 0.40,  # two people share a name far more often than an account
+    "location": 0.25,  # thousands of unrelated people share a place
 }
 DEFAULT_WEIGHT = 0.6
 
 STRENGTH_BANDS = ((0.85, "strong"), (0.60, "moderate"))
+
+# What a shared identifier of each kind actually proves. A named thing is not
+# an identifier: the same name appearing twice is a lead to check, not a link
+# that has been established.
+_CAVEATS = {
+    "party": "A shared name is weak evidence of a shared person and needs confirmation.",
+    "person": "A shared name is weak evidence of a shared person. Two people can have the same name; confirm identity before treating this as a link.",
+    "organisation": "Organisation names are abbreviated and reused. Confirm this is the same entity before relying on the link.",
+    "location": "A shared location links the records to a place, not to each other. Thousands of unrelated people share a place.",
+    "vehicle": "This is an exact registration match. It links the records to one vehicle, not to whoever was driving it.",
+}
 
 
 @dataclass
@@ -212,6 +227,10 @@ def describe_connections(db: Session, case_id: str, *, limit: int = 8) -> list[d
             "ifsc": "bank branch code",
             "reference": "transaction reference",
             "device": "device identifier",
+            "vehicle": "vehicle registration",
+            "organisation": "organisation name",
+            "person": "person name",
+            "location": "location",
             "party": "name",
         }.get(bridge.entity_type, bridge.entity_type)
         described.append(
@@ -225,10 +244,9 @@ def describe_connections(db: Session, case_id: str, *, limit: int = 8) -> list[d
                     f"The {label} {bridge.label} appears in {len(names)} evidence items: "
                     f"{', '.join(names)}."
                 ),
-                "caveat": (
-                    "A shared name is weak evidence of a shared person and needs confirmation."
-                    if bridge.entity_type == "party"
-                    else "This is an exact identifier match. It links the files, not the people behind them."
+                "caveat": _CAVEATS.get(
+                    bridge.entity_type,
+                    "This is an exact identifier match. It links the files, not the people behind them.",
                 ),
             }
         )

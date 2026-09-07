@@ -38,10 +38,18 @@ IDENTITY_FIELDS: dict[str, str] = {
     "sender": "party",
     "receiver": "party",
     "chat_participant_identifier": "party",
+    # SIH26189 entity classes. A vehicle is an identifier and behaves like one.
+    # A person and an organisation are named things whose identity the source
+    # rarely proves, and a place identifies nobody at all -- so all three stay
+    # weak and are never merged on similarity alone.
+    "vehicle_identifiers": "vehicle",
+    "organisation_names": "organisation",
+    "person_names": "person",
+    "location_names": "location",
 }
 
 # A name read off a screen is a label, not a proof of identity, so party nodes stay weak.
-PARTY_FIELDS = {"sender", "receiver", "chat_participant_identifier"}
+PARTY_FIELDS = {"sender", "receiver", "chat_participant_identifier", "person_names", "organisation_names", "location_names"}
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
@@ -90,6 +98,27 @@ def canonicalize(field_name: str, raw: str) -> ResolvedIdentity | None:
 
     if kind == "device":
         return ResolvedIdentity("device", value, _NON_ALNUM.sub("", value.casefold()))
+
+    if kind == "vehicle":
+        canonical = patterns.normalize_vehicle(value)
+        # A plate is at least a state code, an RTO code and a serial. Anything
+        # shorter is a fragment, and a fragment links files that share nothing.
+        return ResolvedIdentity("vehicle", value.upper(), canonical) if len(canonical) >= 8 else None
+
+    if kind == "organisation":
+        folded = patterns.normalize_organisation(value)
+        return ResolvedIdentity("organisation", value, folded) if len(folded) >= 3 else None
+
+    if kind == "person":
+        folded = patterns.normalize_person(value)
+        # Two people share a name far more often than they share an account.
+        # This node records that the same name was written down twice; whether
+        # it is the same person is a review decision, never an extraction one.
+        return ResolvedIdentity("person", value, folded) if len(folded) >= 3 else None
+
+    if kind == "location":
+        folded = patterns.normalize_location(value)
+        return ResolvedIdentity("location", value, folded) if len(folded) >= 3 else None
 
     if kind == "party":
         if patterns.EMAIL_PATTERN.fullmatch(value):
