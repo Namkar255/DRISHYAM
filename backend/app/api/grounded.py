@@ -11,6 +11,8 @@ from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DbSession
 from app.models.entities import (
+    Entity,
+    EntityRelation,
     EvidenceFile,
     ModelInferenceRun,
     NormalizedRecord,
@@ -20,6 +22,11 @@ from app.models.entities import (
     RecordReview,
 )
 from app.schemas.grounded import (
+    EntityEndpointResponse,
+    EntityRelationObservation,
+    EntityRelationPage,
+    EntityRelationReviewRequest,
+    EntityRelationSummary,
     EvidenceStagesResponse,
     ModelRunResponse,
     NormalizedRecordPage,
@@ -34,7 +41,8 @@ from app.schemas.grounded import (
     ReviewQueueItem,
     ReviewQueuePage,
 )
-from app.services import record_review
+from app.core.security import utcnow
+from app.services import record_review, relationship_builder
 from app.services.audit import audit
 from app.services.cases import require_case_access
 from app.services.grounded_pipeline import GROUNDED_PIPELINE_VERSION, UI_STAGE_ORDER
@@ -425,3 +433,121 @@ def reanalyze(case_id: str, evidence_id: str, current_user: CurrentUser, db: DbS
 
     reanalyze_evidence_task.delay(evidence.id)
     return {"evidence_id": evidence.id, "status": "queued", "forced_escalation": True}
+
+
+# --------------------------------------------------------------------------- entity relations
+
+
+def _entity_endpoint(entity: Entity | None, entity_id: str) -> EntityEndpointResponse:
+    return EntityEndpointResponse(
+        id=entity_id,
+        label=entity.value if entity else None,
+        type=entity.entity_type if entity else None,
+    )
+
+
+def _entity_relation_response(row: EntityRelation, entities: dict[str, Entity]) -> EntityRelationObservation:
+    return EntityRelationObservation(
+        id=row.id,
+        relation_type=row.relation_type,
+        directed=row.directed,
+        basis=row.basis,
+        subject=_entity_endpoint(entities.get(row.subject_entity_id), row.subject_entity_id),
+        object=_entity_endpoint(entities.get(row.object_entity_id), row.object_entity_id),
+        source_evidence_id=row.source_evidence_id,
+        source_record_id=row.source_record_id,
+        source_reference=dict(row.source_reference or {}),
+        observed_at=row.observed_at,
+        time_precision=row.time_precision,
+        confidence=float(row.confidence),
+        verification_status=row.verification_status,
+        review_note=row.review_note,
+        created_at=row.created_at,
+    )
+
+
+@router.get("/entity-relations", response_model=EntityRelationPage)
+def list_entity_relations(
+    case_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+    relation_type: str | None = None,
+    entity_id: str | None = None,
+    verification_status: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> EntityRelationPage:
+    """Individual observations, each openable at the exact source region it came from."""
+    require_case_access(db, case_id, current_user)
+
+    conditions = [EntityRelation.case_id == case_id]
+    if relation_type:
+        conditions.append(EntityRelation.relation_type == relation_type)
+    if verification_status:
+        conditions.append(EntityRelation.verification_status == verification_status)
+    if entity_id:
+        conditions.append(
+            or_(EntityRelation.subject_entity_id == entity_id, EntityRelation.object_entity_id == entity_id)
+        )
+
+    total = db.scalar(select(func.count()).select_from(EntityRelation).where(*conditions)) or 0
+    rows = db.scalars(
+        select(EntityRelation)
+        .where(*conditions)
+        .order_by(EntityRelation.confidence.desc(), EntityRelation.created_at)
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    entities = {item.id: item for item in db.scalars(select(Entity).where(Entity.case_id == case_id)).all()}
+    return EntityRelationPage(
+        items=[_entity_relation_response(row, entities) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/entity-relations/summary", response_model=list[EntityRelationSummary])
+def summarize_entity_relations(case_id: str, current_user: CurrentUser, db: DbSession) -> list[EntityRelationSummary]:
+    """Distinct relationships, ranked by how many independent sources support each one.
+
+    Ten mentions inside one file are one source. Two mentions across two files are corroboration,
+    and that is what should drive review priority.
+    """
+    require_case_access(db, case_id, current_user)
+    return [EntityRelationSummary(**entry) for entry in relationship_builder.relation_summary(db, case_id)]
+
+
+@router.post("/entity-relations/{relation_id}/review", response_model=EntityRelationObservation)
+def review_entity_relation(
+    case_id: str,
+    relation_id: str,
+    payload: EntityRelationReviewRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> EntityRelationObservation:
+    """Confirm or reject one observation. The row is never deleted; the decision is recorded on it."""
+    require_case_access(db, case_id, current_user)
+    row = db.scalar(select(EntityRelation).where(EntityRelation.id == relation_id, EntityRelation.case_id == case_id))
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Relationship not found in this case.")
+
+    row.verification_status = "human_verified" if payload.action == "confirm_relationship" else "rejected"
+    row.reviewed_by_id = current_user.id
+    row.reviewed_at = utcnow()
+    row.review_note = payload.reason
+
+    audit(
+        db,
+        action="grounded.entity_relation_review",
+        object_type="entity_relation",
+        object_id=relation_id,
+        case_id=case_id,
+        outcome="success",
+        actor_id=current_user.id,
+        details={"review_action": payload.action, "relation_type": row.relation_type},
+    )
+    db.commit()
+    db.refresh(row)
+    entities = {item.id: item for item in db.scalars(select(Entity).where(Entity.case_id == case_id)).all()}
+    return _entity_relation_response(row, entities)

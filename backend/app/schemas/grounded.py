@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -173,3 +173,60 @@ class ReviewQueuePage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class EntityEndpointResponse(BaseModel):
+    id: str
+    label: str | None
+    type: str | None
+
+
+class EntityRelationObservation(BaseModel):
+    """One record's statement of a relationship, with the place it can be read."""
+
+    id: str
+    relation_type: str
+    directed: bool
+    basis: str
+    subject: EntityEndpointResponse
+    object: EntityEndpointResponse
+    source_evidence_id: str
+    source_record_id: str | None
+    source_reference: dict[str, Any]
+    observed_at: datetime | None
+    time_precision: str
+    confidence: float
+    verification_status: str
+    review_note: str | None
+    created_at: datetime
+
+
+class EntityRelationSummary(BaseModel):
+    """A distinct relationship, and how many independent records support it."""
+
+    relation_type: str
+    meaning: str
+    directed: bool
+    subject: EntityEndpointResponse
+    object: EntityEndpointResponse
+    observation_ids: list[str]
+    observation_count: int
+    evidence_ids: list[str]
+    supporting_evidence_count: int
+    bases: list[str]
+    confidence: float
+    verification_status: str
+    first_observed_at: datetime | None
+    last_observed_at: datetime | None
+
+
+class EntityRelationPage(BaseModel):
+    items: list[EntityRelationObservation]
+    total: int
+    limit: int
+    offset: int
+
+
+class EntityRelationReviewRequest(BaseModel):
+    action: Literal["confirm_relationship", "reject_relationship"]
+    reason: str | None = None
