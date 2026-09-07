@@ -58,6 +58,18 @@ class EvidenceStatus(str, Enum):
     AWAITING_REVIEW = "awaiting_review"
     COMPLETED = "completed"
     FAILED = "failed"
+    # Grounded-pipeline stage vocabulary. These are additive: `EvidenceFile.status` still moves only
+    # through the legacy values above, because the frontend pins those as a closed union. The
+    # granular lifecycle is served from the evidence stages endpoint instead.
+    RECEIVED = "received"
+    TYPE_DETECTED = "type_detected"
+    OCR_COMPLETED = "ocr_completed"
+    LOCAL_MODEL_COMPLETED = "local_model_completed"
+    GROQ_ESCALATED = "groq_escalated"
+    VALIDATED = "validated"
+    REVIEW_REQUIRED = "review_required"
+    READY = "ready"
+    PARTIALLY_PROCESSED = "partially_processed"
 
 
 class ProcessingState(str, Enum):
@@ -580,6 +592,198 @@ class NotificationPreference(Base):
 
     user: Mapped[User] = relationship("User", back_populates="notification_preferences")
     __table_args__ = (UniqueConstraint("user_id", "category", name="uq_notification_preference_user_category"),)
+
+
+class RawExtractionArtifact(Base):
+    """One versioned, immutable layer of deterministic extraction for a piece of evidence.
+
+    Written and committed before any model runs, so a provider outage can never destroy extraction
+    that already succeeded.
+    """
+
+    __tablename__ = "raw_extraction_artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    evidence_id: Mapped[str] = mapped_column(ForeignKey("evidence_files.id", ondelete="CASCADE"), index=True, nullable=False)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    artifact_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    layer: Mapped[str] = mapped_column(String(48), nullable=False)
+    extractor_name: Mapped[str] = mapped_column(String(96), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    quality_flags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("evidence_id", "artifact_version", "layer", name="uq_raw_artifact_version_layer"),
+        Index("ix_raw_artifacts_case_evidence", "case_id", "evidence_id"),
+    )
+
+
+class ModelInferenceRun(Base):
+    """One provider call. Raw model output is preserved verbatim, including when models disagree."""
+
+    __tablename__ = "model_inference_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    evidence_id: Mapped[str] = mapped_column(ForeignKey("evidence_files.id", ondelete="CASCADE"), index=True, nullable=False)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    record_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider: Mapped[str] = mapped_column(String(48), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    role: Mapped[str] = mapped_column(String(24), nullable=False, default="local")
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    cache_key: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    raw_output: Mapped[str | None] = mapped_column(Text)
+    parsed_payload: Mapped[dict | None] = mapped_column(JSON)
+    grounding_report: Mapped[dict | None] = mapped_column(JSON)
+    error_json: Mapped[dict | None] = mapped_column(JSON)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("evidence_id", "record_key", "cache_key", name="uq_inference_run_cache"),
+        Index("ix_inference_case_evidence", "case_id", "evidence_id"),
+    )
+
+
+class NormalizedRecord(Base):
+    """A source-grounded observation. `null` is a meaningful, deliberate value in every column."""
+
+    __tablename__ = "normalized_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    evidence_id: Mapped[str] = mapped_column(ForeignKey("evidence_files.id", ondelete="CASCADE"), index=True, nullable=False)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(String(36))
+    record_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_file_name: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    observed_text: Mapped[str | None] = mapped_column(Text)
+    normalized_summary: Mapped[str | None] = mapped_column(Text)
+    event_type: Mapped[str | None] = mapped_column(String(120))
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    event_time_raw: Mapped[str | None] = mapped_column(String(160))
+    event_time_precision: Mapped[str] = mapped_column(String(24), nullable=False, default="unknown")
+    participant_a: Mapped[str | None] = mapped_column(String(255))
+    participant_b: Mapped[str | None] = mapped_column(String(255))
+    sender: Mapped[str | None] = mapped_column(String(255))
+    receiver: Mapped[str | None] = mapped_column(String(255))
+    message_direction: Mapped[str | None] = mapped_column(String(16))
+    chat_participant_identifier: Mapped[str | None] = mapped_column(String(255))
+    phone_numbers: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    email_addresses: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    account_identifiers: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    transaction_reference: Mapped[str | None] = mapped_column(String(160), index=True)
+    amount_value: Mapped[float | None] = mapped_column(Numeric(16, 2))
+    amount_currency: Mapped[str | None] = mapped_column(String(8))
+    # What the figure is — a payment, a request, a fee, or a balance. A balance is a position, not a
+    # transfer, so it must never be projected into the transaction trail.
+    amount_role: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown", server_default="unknown")
+    location: Mapped[str | None] = mapped_column(String(255))
+    device_identifier: Mapped[str | None] = mapped_column(String(160))
+    event_attributes: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    observation_basis: Mapped[str] = mapped_column(String(24), nullable=False, default="unknown")
+    field_provenance: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    model_confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    validation_confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    final_confidence_band: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    validation_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unvalidated")
+    requires_human_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    review_reason: Mapped[str | None] = mapped_column(Text)
+    review_state: Mapped[str] = mapped_column(String(24), nullable=False, default="unreviewed")
+    conflict_fields: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    escalated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    raw_extraction_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    raw_model_output_version: Mapped[str | None] = mapped_column(String(64))
+    extraction_model_name: Mapped[str | None] = mapped_column(String(160))
+    prompt_version: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("evidence_id", "record_key", "raw_extraction_version", name="uq_normalized_record_version"),
+        Index("ix_normalized_case_review", "case_id", "requires_human_review", "final_confidence_band"),
+        Index("ix_normalized_case_created", "case_id", "created_at"),
+    )
+
+
+class RecordRelation(Base):
+    """A candidate corroboration or contradiction. Never an automatic conclusion."""
+
+    __tablename__ = "record_relations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    relation_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="candidate")
+    detection_method: Mapped[str] = mapped_column(String(32), nullable=False, default="exact_match")
+    evidence_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    record_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    matching_or_conflicting_fields: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    source_references: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    confidence: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False, default=0.0)
+    requires_human_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    review_decision: Mapped[str | None] = mapped_column(String(32))
+    reviewed_by_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (Index("ix_record_relations_case_type_status", "case_id", "relation_type", "status"),)
+
+
+class EntityOccurrence(Base):
+    """Every place one identifier was seen.
+
+    `Entity.source_evidence_id` can only name the file the identifier was *first* seen in, so a UPI
+    handle appearing in a chat, a receipt and a bank statement still looked like it belonged to one
+    file. Cross-evidence linking is the product's whole purpose, so where an identifier appears is
+    modelled as its own many-to-many fact rather than inferred by walking events.
+    """
+
+    __tablename__ = "entity_occurrences"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    entity_id: Mapped[str] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), index=True, nullable=False)
+    evidence_id: Mapped[str] = mapped_column(ForeignKey("evidence_files.id", ondelete="CASCADE"), index=True, nullable=False)
+    record_id: Mapped[str | None] = mapped_column(ForeignKey("normalized_records.id", ondelete="SET NULL"))
+    field_name: Mapped[str | None] = mapped_column(String(64))
+    observed_value: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_reference: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    detection_method: Mapped[str] = mapped_column(String(64), nullable=False, default="grounded_pipeline")
+    confidence: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False, default=0.5)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("entity_id", "evidence_id", "field_name", name="uq_entity_occurrence"),
+        Index("ix_entity_occurrence_case_entity", "case_id", "entity_id"),
+        Index("ix_entity_occurrence_case_evidence", "case_id", "evidence_id"),
+    )
+
+
+class RecordReview(Base):
+    """Append-only reviewer decisions. Original evidence and raw model output are never overwritten."""
+
+    __tablename__ = "record_reviews"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    record_id: Mapped[str | None] = mapped_column(ForeignKey("normalized_records.id", ondelete="CASCADE"), index=True)
+    relation_id: Mapped[str | None] = mapped_column(ForeignKey("record_relations.id", ondelete="CASCADE"), index=True)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    field_name: Mapped[str | None] = mapped_column(String(96))
+    previous_value: Mapped[dict | None] = mapped_column(JSON)
+    new_value: Mapped[dict | None] = mapped_column(JSON)
+    reason: Mapped[str | None] = mapped_column(Text)
+    reviewer_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    audit_log_id: Mapped[str | None] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (Index("ix_record_reviews_case_created", "case_id", "created_at"),)
 
 
 class Notification(Base):
