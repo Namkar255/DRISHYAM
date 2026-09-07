@@ -334,4 +334,10 @@ def project_case(db: Session, case_id: str) -> dict[str, int]:
     # Identity resolution runs after projection so every sighting of a shared identifier is
     # registered against the evidence it was actually seen in.
     totals["identity_occurrences"] = resolve_case(db, case_id)["occurrences_added"]
+
+    # Relationships are derived last, because both ends of an edge must already be resolved
+    # entities. Building them earlier would mint nodes that no occurrence accounts for.
+    from app.services.relationship_builder import build_relations_for_case
+
+    totals["entity_relations"] = build_relations_for_case(db, case_id)["relations_added"]
     return totals
