@@ -230,3 +230,85 @@ class EntityRelationPage(BaseModel):
 class EntityRelationReviewRequest(BaseModel):
     action: Literal["confirm_relationship", "reject_relationship"]
     reason: str | None = None
+
+
+class ImportantEntityResponse(BaseModel):
+    """A ranked entity, and the countable reason it ranked there.
+
+    `why` and `caveat` are not decoration. A bare centrality score invites an investigator to read
+    it as a measure of criminality, which is the single most damaging misreading this system can
+    produce, so the sentence travels with the number everywhere.
+    """
+
+    entity_id: str
+    label: str
+    entity_type: str
+    metric: str
+    score: float
+    rank: int
+    connections: int
+    supporting_evidence_count: int
+    communities_linked: int
+    is_bridge: bool
+    why: str
+    caveat: str
+
+
+class NetworkNodeResponse(BaseModel):
+    id: str
+    label: str
+    entity_type: str
+
+
+class NetworkEdgeResponse(BaseModel):
+    subject_entity_id: str
+    object_entity_id: str
+    relation_types: list[str]
+    confidence: float
+    observations: int
+    supporting_evidence_count: int
+
+
+class BridgeRelationshipResponse(BaseModel):
+    subject: dict[str, Any]
+    object: dict[str, Any]
+    relation_types: list[str]
+    confidence: float
+    observations: int
+    supporting_evidence_count: int
+    why: str
+    caveat: str
+
+
+class CommunityResponse(BaseModel):
+    community_id: int
+    size: int
+    supporting_evidence_count: int
+    members: list[dict[str, Any]]
+    caveat: str
+
+
+class NetworkPathResponse(BaseModel):
+    found: bool
+    reason: str | None = None
+    nodes: list[dict[str, Any]] = []
+    edges: list[NetworkEdgeResponse] = []
+    weakest_link_confidence: float | None = None
+    caveat: str | None = None
+
+
+class NetworkSubgraphResponse(BaseModel):
+    center: str | None = None
+    hops: int | None = None
+    nodes: list[NetworkNodeResponse] = []
+    edges: list[NetworkEdgeResponse] = []
+    truncated: bool = False
+
+
+class NetworkOverviewResponse(BaseModel):
+    entities: int
+    relationships: int
+    communities: int
+    bridges: int
+    isolated_entities: int
+    analytics_version: str

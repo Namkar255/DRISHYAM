@@ -6,6 +6,8 @@ Every route is case-scoped through `require_case_access`, paginated, and returns
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
@@ -22,13 +24,21 @@ from app.models.entities import (
     RecordReview,
 )
 from app.schemas.grounded import (
+    BridgeRelationshipResponse,
+    CommunityResponse,
     EntityEndpointResponse,
     EntityRelationObservation,
     EntityRelationPage,
     EntityRelationReviewRequest,
     EntityRelationSummary,
     EvidenceStagesResponse,
+    ImportantEntityResponse,
     ModelRunResponse,
+    NetworkEdgeResponse,
+    NetworkNodeResponse,
+    NetworkOverviewResponse,
+    NetworkPathResponse,
+    NetworkSubgraphResponse,
     NormalizedRecordPage,
     NormalizedRecordResponse,
     ProcessingStageResponse,
@@ -42,6 +52,7 @@ from app.schemas.grounded import (
     ReviewQueuePage,
 )
 from app.core.security import utcnow
+from app.graph import analytics
 from app.services import record_review, relationship_builder
 from app.services.audit import audit
 from app.services.cases import require_case_access
@@ -551,3 +562,95 @@ def review_entity_relation(
     db.refresh(row)
     entities = {item.id: item for item in db.scalars(select(Entity).where(Entity.case_id == case_id)).all()}
     return _entity_relation_response(row, entities)
+
+
+# --------------------------------------------------------------------------- network analytics
+
+
+@router.get("/network/overview", response_model=NetworkOverviewResponse)
+def network_overview(case_id: str, current_user: CurrentUser, db: DbSession) -> NetworkOverviewResponse:
+    require_case_access(db, case_id, current_user)
+    return NetworkOverviewResponse(**analytics.network_overview(db, case_id))
+
+
+@router.get("/network/important", response_model=list[ImportantEntityResponse])
+def important_entities(
+    case_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+    metric: Literal["betweenness_centrality", "degree_centrality", "eigenvector_centrality"] = "betweenness_centrality",
+    entity_type: str | None = None,
+    min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+    verified_only: bool = False,
+    limit: int = Query(default=10, ge=1, le=100),
+) -> list[ImportantEntityResponse]:
+    """Entities ranked by network position, each carrying the reason it ranked there.
+
+    This answers the problem statement's "identify influential individuals". The answer is always a
+    sentence plus a caveat, never a bare score: a number on its own invites the reading that the
+    system is scoring people for criminality, which it is not doing and must not appear to do.
+    """
+    require_case_access(db, case_id, current_user)
+    return [
+        ImportantEntityResponse(**entry)
+        for entry in analytics.important_entities(
+            db,
+            case_id,
+            metric=metric,
+            limit=limit,
+            entity_type=entity_type,
+            min_confidence=min_confidence,
+            verified_only=verified_only,
+        )
+    ]
+
+
+@router.get("/network/bridges", response_model=list[BridgeRelationshipResponse])
+def bridge_relationships(
+    case_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+    min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+) -> list[BridgeRelationshipResponse]:
+    """Relationships whose removal would disconnect part of the network -- verify these first."""
+    require_case_access(db, case_id, current_user)
+    return [BridgeRelationshipResponse(**entry) for entry in analytics.bridge_relationships(db, case_id, min_confidence=min_confidence)]
+
+
+@router.get("/network/communities", response_model=list[CommunityResponse])
+def network_communities(
+    case_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+    min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+) -> list[CommunityResponse]:
+    require_case_access(db, case_id, current_user)
+    return [CommunityResponse(**entry) for entry in analytics.communities(db, case_id, min_confidence=min_confidence)]
+
+
+@router.get("/network/path", response_model=NetworkPathResponse)
+def network_path(
+    case_id: str,
+    source_entity_id: str,
+    target_entity_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+    min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+) -> NetworkPathResponse:
+    """The best-supported chain between two entities. "No path" is returned as a real answer."""
+    require_case_access(db, case_id, current_user)
+    return NetworkPathResponse(**analytics.shortest_path(db, case_id, source_entity_id, target_entity_id, min_confidence=min_confidence))
+
+
+@router.get("/network/subgraph", response_model=NetworkSubgraphResponse)
+def network_subgraph(
+    case_id: str,
+    entity_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+    hops: int = Query(default=1, ge=1, le=3),
+    min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+) -> NetworkSubgraphResponse:
+    """One entity's neighbourhood. The browser expands outward rather than loading a whole case."""
+    require_case_access(db, case_id, current_user)
+    return NetworkSubgraphResponse(**analytics.subgraph(db, case_id, entity_id, hops=hops, min_confidence=min_confidence))
