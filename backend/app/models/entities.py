@@ -770,6 +770,66 @@ class EntityOccurrence(Base):
     )
 
 
+class EntityRelation(Base):
+    """One observation of a relationship between two resolved entities.
+
+    This is the criminal-network edge SIH26189 asks for. `EntityOccurrence` says an identifier was
+    seen in a file; this says two entities stand in a stated relation to each other.
+
+    **One row is one observation, not one relationship.** If three records show the same pair, that
+    is three rows. Collapsing them into a single edge with a counter would leave the edge pointing
+    at one arbitrary source, and an investigator who clicks it would be shown evidence that is not
+    the whole basis for the claim. Aggregation belongs to the read side; the write side keeps
+    provenance exact.
+
+    **Invariant:** `source_evidence_id` and `source_reference` are NOT NULL. An edge with no source
+    is not investigative intelligence, and refusing to write one is what keeps traceability
+    coverage at 100% by construction rather than by audit.
+    """
+
+    __tablename__ = "entity_relations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+
+    subject_entity_id: Mapped[str] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), index=True, nullable=False)
+    object_entity_id: Mapped[str] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), index=True, nullable=False)
+    relation_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    # False means the source shows the two parties together but not who acted on whom. A call log
+    # that lists both numbers in one column proves contact, not who dialled. Such rows are stored
+    # once in a canonical order rather than twice in both directions.
+    directed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    source_evidence_id: Mapped[str] = mapped_column(ForeignKey("evidence_files.id", ondelete="CASCADE"), index=True, nullable=False)
+    source_record_id: Mapped[str | None] = mapped_column(ForeignKey("normalized_records.id", ondelete="SET NULL"))
+    source_reference: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # How the relation was established: stated_roles, table_row, or co_occurrence. It is shown to
+    # the reviewer, because "the source named both" is a far weaker claim than "the source states
+    # one paid the other".
+    basis: Mapped[str] = mapped_column(String(32), nullable=False, default="co_occurrence")
+
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    time_precision: Mapped[str] = mapped_column(String(24), nullable=False, default="unknown")
+
+    extraction_method: Mapped[str] = mapped_column(String(64), nullable=False)
+    confidence: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False, default=0.0)
+    verification_status: Mapped[str] = mapped_column(String(32), nullable=False, default="machine_extracted")
+    reviewed_by_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(Text)
+
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_entity_relations_case_type", "case_id", "relation_type"),
+        Index("ix_entity_relations_subject", "case_id", "subject_entity_id"),
+        Index("ix_entity_relations_object", "case_id", "object_entity_id"),
+        Index("ix_entity_relations_case_time", "case_id", "observed_at"),
+        Index("ix_entity_relations_review", "case_id", "verification_status"),
+    )
+
+
 class RecordReview(Base):
     """Append-only reviewer decisions. Original evidence and raw model output are never overwritten."""
 
