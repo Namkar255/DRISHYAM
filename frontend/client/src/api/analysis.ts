@@ -16,6 +16,13 @@ export type GraphRecord = {
     source_event_id?: string | null;
     review_status?: string | null;
     time_precision?: string | null;
+    identifier_type?: string;
+    evidence_count?: number;
+    occurrences?: number;
+    strength?: number;
+    strength_band?: string;
+    connected?: boolean;
+    bridge_count?: number;
   }>;
   edges: Array<{
     id?: string;
@@ -26,8 +33,29 @@ export type GraphRecord = {
     source_evidence_id?: string | null;
     source_event_id?: string | null;
     occurred_at?: string | null;
+    link_style?: string;
+    basis?: string;
+    strength?: number;
+    strength_band?: string;
   }>;
   metrics: { node_count: number; edge_count: number; components: number };
+  /** Plain-language description of what ties the evidence together. */
+  connections?: Array<{
+    identifier: string;
+    identifier_label: string;
+    evidence_names: string[];
+    evidence_count: number;
+    strength_band: string;
+    sentence: string;
+    caveat: string;
+  }>;
+  summary?: {
+    evidence_count: number;
+    connected_evidence: number;
+    isolated_evidence: Array<{ id: string; label: string }>;
+    bridge_count: number;
+    strongest: Array<{ label: string; identifier_type: string; evidence_count: number; strength_band: string }>;
+  };
 };
 export type TransactionRecord = { id: string; event_id: string | null; source_evidence_id: string; amount: number; currency: string; occurred_at: string | null; reference_id: string | null; sender_value: string | null; receiver_value: string | null; source_kind: string; confidence: number; review_status: string };
 export type AlertRecord = { id: string; rule_code: string; severity: string; status: string; explanation: string; affected_evidence_ids: string[]; related_event_id: string | null; generated_at: string; reviewed_at: string | null };
