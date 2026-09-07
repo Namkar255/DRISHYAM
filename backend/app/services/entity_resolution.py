@@ -181,8 +181,18 @@ def _entity_for(db: Session, record: NormalizedRecord, identity: ResolvedIdentit
     return entity
 
 
-def resolve_record(db: Session, record: NormalizedRecord) -> int:
-    """Register every identity this record observed. Returns how many new sightings were stored."""
+def resolve_record(db: Session, record: NormalizedRecord, seen: set[tuple[str, str, str]] | None = None) -> int:
+    """Register every identity this record observed. Returns how many new sightings were stored.
+
+    `seen` carries the occurrences already queued in this transaction. The session runs with
+    autoflush disabled, so a SELECT cannot see a row that an earlier record in the same pass has
+    added but not yet flushed. Without this set the duplicate survived all the way to the flush and
+    raised a UniqueViolation on uq_entity_occurrence -- which aborted the whole projection, so
+    events, transactions and every identity sighting were rolled back together and the connection
+    graph stayed empty.
+    """
+    if seen is None:
+        seen = set()
     stored = 0
     for field_name in IDENTITY_FIELDS:
         for raw in _values_for(record, field_name):
@@ -191,6 +201,12 @@ def resolve_record(db: Session, record: NormalizedRecord) -> int:
                 continue
 
             entity = _entity_for(db, record, identity)
+            key = (entity.id, record.evidence_id, field_name)
+            if key in seen:
+                # Two spellings in one field can resolve to the same node -- a number written both
+                # grouped and unbroken is one phone, seen once.
+                continue
+
             existing = db.scalar(
                 select(EntityOccurrence).where(
                     EntityOccurrence.entity_id == entity.id,
@@ -199,8 +215,10 @@ def resolve_record(db: Session, record: NormalizedRecord) -> int:
                 )
             )
             if existing is not None:
+                seen.add(key)
                 continue
 
+            seen.add(key)
             db.add(
                 EntityOccurrence(
                     case_id=record.case_id,
@@ -223,5 +241,8 @@ def resolve_case(db: Session, case_id: str) -> dict[str, int]:
     records = db.scalars(
         select(NormalizedRecord).where(NormalizedRecord.case_id == case_id).order_by(NormalizedRecord.created_at)
     ).all()
-    stored = sum(resolve_record(db, record) for record in records)
+    # One set for the whole pass: several records from one evidence item routinely observe the same
+    # identifier, and each of those is one sighting of that file, not one per record.
+    seen: set[tuple[str, str, str]] = set()
+    stored = sum(resolve_record(db, record, seen) for record in records)
     return {"records": len(records), "occurrences_added": stored}
