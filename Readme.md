@@ -45,7 +45,7 @@ These capabilities are required by SIH26189 and are being added on the existing 
 | Capability | Status |
 |---|---|
 | Person, vehicle, location and organisation extraction | **Done** — alongside phone, email, UPI, account, IFSC and reference identifiers. Each resolves to a weighted graph node with its own uncertainty caveat |
-| Typed entity-to-entity relationships with provenance (`CALLED`, `TRANSFERRED_TO`, `LOCATED_AT`, `USED_VEHICLE`) | In progress — evidence-to-identifier linking already works |
+| Typed entity-to-entity relationships with provenance | **Done** — `TRANSFERRED_TO`, `REQUESTED_PAYMENT_FROM`, `MESSAGED`, `COMMUNICATED_WITH`, `ASSOCIATED_WITH`, `MENTIONED_WITH`. Every edge carries the evidence and source region it was read from. `USED_VEHICLE` and `LOCATED_AT` wait for the FIR and surveillance adapters, which is what would establish them |
 | Network analytics: centrality, bridge detection, communities | Planned |
 | CDR and FIR source adapters | Planned — generic CSV, PDF, image and email parsing already works |
 | Temporal analytics and incident-window pattern rules | Planned — five explainable alert rules already run |
