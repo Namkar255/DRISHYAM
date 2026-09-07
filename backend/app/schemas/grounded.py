@@ -62,6 +62,10 @@ class NormalizedRecordResponse(BaseModel):
     phone_numbers: list[str]
     email_addresses: list[str]
     account_identifiers: list[str]
+    vehicle_identifiers: list[str] = []
+    organisation_names: list[str] = []
+    person_names: list[str] = []
+    location_names: list[str] = []
     transaction_reference: str | None
     amount: dict[str, Any]
     location: str | None
