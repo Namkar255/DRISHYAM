@@ -30,8 +30,9 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import utcnow
-from app.models.entities import Alert, AuditLog, Case, Claim, Contradiction, Entity, Event, EvidenceFile, ProcessingRun, ProcessingState, Report, ReviewDecision, Transaction
+from app.models.entities import Alert, AuditLog, Case, Claim, Contradiction, Entity, Event, EvidenceFile, NormalizedRecord, ProcessingRun, ProcessingState, RecordRelation, Report, ReviewDecision, Transaction
 from app.graph.projection import build_case_graph
+from app.graph.connections import build_connection_graph, describe_connections
 from app.services.storage import get_report_artifact_path, publish_private_file, report_storage_key
 from app.services.trustify import create_receipt
 
@@ -55,17 +56,76 @@ HEADER_CELL_STYLE = ParagraphStyle(
 META_STYLE = ParagraphStyle("ReportMeta", fontName="Courier", fontSize=6.7, leading=8.4, textColor=colors.HexColor("#5d5852"))
 
 
+# Two extraction generations name the same thing differently ("upi_id" then "upi", "person" then
+# "party"). Charting the raw column showed both, so one UPI handle counted twice. An amount is not
+# an identity at all and is excluded rather than renamed.
+ENTITY_DISPLAY = {
+    "phone": "Phone",
+    "email": "Email",
+    "upi": "UPI handle",
+    "upi_id": "UPI handle",
+    "account": "Account",
+    "account_number": "Account",
+    "ifsc": "Bank branch code",
+    "reference": "Transaction reference",
+    "utr": "Transaction reference",
+    "party": "Named party",
+    "person": "Named party",
+    "device": "Device",
+    "url": "Web address",
+    "ip_address": "IP address",
+}
+NON_IDENTITY_ENTITY_TYPES = {"amount"}
+
+
+def _entity_display(entity_type: str) -> str | None:
+    """The label a reader sees, or None when the row is not an identity at all."""
+    if entity_type in NON_IDENTITY_ENTITY_TYPES:
+        return None
+    return ENTITY_DISPLAY.get(entity_type, entity_type.replace("_", " ").title())
+
+
+def _unique_relations(relations: list) -> list:
+    """Collapse relation rows that say the same thing.
+
+    Correlation writes one row per pair of records, so an identifier shared by four records
+    produced six identical "corroboration / account_identifiers / 0.85" lines. A reader needs the
+    finding once.
+    """
+    seen: set[tuple] = set()
+    unique = []
+    for item in relations:
+        key = (
+            item.relation_type,
+            item.detection_method,
+            tuple(sorted(item.matching_or_conflicting_fields or [])),
+            tuple(sorted(item.evidence_ids or [])),
+            round(float(item.confidence), 2),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
 def _snapshot(db: Session, case_id: str) -> dict:
     case = db.get(Case, case_id)
     if not case:
         raise ValueError("Case not found")
     evidence = db.scalars(select(EvidenceFile).where(EvidenceFile.case_id == case_id).order_by(EvidenceFile.uploaded_at)).all()
-    events = db.scalars(select(Event).where(Event.case_id == case_id).order_by(Event.occurred_at)).all()
+    # Same rule as the live timeline: a raw OCR event whose file the grounded pass has already read
+    # is a duplicate of that record's quoted source text, so it is not listed twice.
+    from app.api.analysis import _visible_timeline_events
+
+    events = _visible_timeline_events(db, case_id)
     transactions = db.scalars(select(Transaction).where(Transaction.case_id == case_id).order_by(Transaction.occurred_at)).all()
     alerts = db.scalars(select(Alert).where(Alert.case_id == case_id).order_by(Alert.generated_at)).all()
     claims = db.scalars(select(Claim).where(Claim.case_id == case_id).order_by(Claim.created_at)).all()
     contradictions = db.scalars(select(Contradiction).where(Contradiction.case_id == case_id).order_by(Contradiction.created_at)).all()
     reviews = db.scalars(select(ReviewDecision).where(ReviewDecision.case_id == case_id).order_by(ReviewDecision.created_at)).all()
+    grounded = db.scalars(select(NormalizedRecord).where(NormalizedRecord.case_id == case_id).order_by(NormalizedRecord.created_at)).all()
+    relations = db.scalars(select(RecordRelation).where(RecordRelation.case_id == case_id).order_by(RecordRelation.confidence.desc())).all()
     return {
         "case": {
             "number": case.case_number,
@@ -80,12 +140,51 @@ def _snapshot(db: Session, case_id: str) -> dict:
             "priority": case.priority.value,
         },
         "evidence": [{"id": item.id, "name": item.original_name, "hash": item.sha256, "status": item.status.value} for item in evidence],
-        "events": [{"time": item.occurred_at.isoformat() if item.occurred_at else None, "type": item.event_type, "description": item.description, "review": item.review_status.value} for item in events],
-        "transactions": [{"time": item.occurred_at.isoformat() if item.occurred_at else None, "amount": float(item.amount), "sender": item.sender_value, "receiver": item.receiver_value, "reference": item.reference_id, "review": item.review_status.value} for item in transactions],
+        "events": [{"time": item.occurred_at.isoformat() if item.occurred_at else None, "original_time": item.original_time, "precision": item.time_precision, "type": item.event_type, "description": item.description, "review": item.review_status.value} for item in events],
+        "transactions": [{"time": item.occurred_at.isoformat() if item.occurred_at else None, "amount": float(item.amount), "currency": item.currency or "INR", "sender": item.sender_value, "receiver": item.receiver_value, "reference": item.reference_id, "review": item.review_status.value} for item in transactions],
         "alerts": [{"rule": item.rule_code, "severity": item.severity.value, "status": item.status.value, "explanation": item.explanation} for item in alerts],
         "claims": [{"id": item.id, "statement": item.statement, "type": item.claim_type, "status": item.status.value} for item in claims],
         "contradictions": [{"id": item.id, "subject": item.subject, "description": item.description, "status": item.status.value} for item in contradictions],
         "reviews": [{"subject_type": item.subject_type, "subject_id": item.subject_id, "decision": item.decision.value, "note": item.note} for item in reviews],
+        "grounded_records": [
+            {
+                "source": item.source_file_name,
+                "source_type": item.source_type,
+                "summary": item.normalized_summary,
+                "observed_text": item.observed_text,
+                "event_type": item.event_type,
+                "time": item.event_time.isoformat() if item.event_time else None,
+                "sender": item.sender,
+                "receiver": item.receiver,
+                "chat_participant_identifier": item.chat_participant_identifier,
+                "amount": float(item.amount_value) if item.amount_value is not None else None,
+                "currency": item.amount_currency,
+                "amount_role": item.amount_role,
+                "basis": item.observation_basis,
+                "band": item.final_confidence_band,
+                "validation_status": item.validation_status,
+                "requires_review": item.requires_human_review,
+                "review_reason": item.review_reason,
+                "model": item.extraction_model_name,
+                "conflicts": list(item.conflict_fields or []),
+                "provenance_fields": sorted((item.field_provenance or {}).keys()),
+            }
+            for item in grounded
+        ],
+        "connections": describe_connections(db, case_id),
+        "connection_summary": build_connection_graph(db, case_id)["summary"],
+        "candidate_relations": [
+            {
+                "type": item.relation_type,
+                "status": item.status,
+                "method": item.detection_method,
+                "fields": list(item.matching_or_conflicting_fields or []),
+                "reason": item.reason,
+                "confidence": float(item.confidence),
+                "requires_review": item.requires_human_review,
+            }
+            for item in _unique_relations(relations)
+        ],
     }
 
 
@@ -98,8 +197,47 @@ def create_report_record(db: Session, *, case_id: str, generated_by_id: str, red
     return report
 
 
+# ReportLab's built-in fonts are Type-1 with WinAnsi encoding. A character outside that set is not
+# refused — it is emitted as its raw UTF-8 bytes, which the viewer then reads as Latin-1, so a
+# downward arrow arrived on the page as "→". Report body text is one thing; quoted OCR
+# text is another, and a screenshot can contain any character at all. Everything printed therefore
+# passes through this mapping first.
+_FONT_SUBSTITUTIONS = {
+    "→": ">", "←": "<", "↓": "v", "↑": "^", "⇒": "=>", "⇐": "<=",
+    "≠": "!=", "≤": "<=", "≥": ">=", "×": "x", "−": "-",
+    "‘": "'", "’": "'", "‚": ",", "‹": "<", "›": ">",
+    "′": "'", "″": '"', " ": " ", "​": "", "﻿": "",
+    # Currency marks appear inside quoted evidence. Turning them into "?" would destroy the very
+    # part of the quote a reviewer is checking, so each keeps its conventional written form.
+    "₹": "Rs", "₨": "Rs", "₩": "W", "₪": "NIS", "฿": "THB", "₫": "d",
+}
+
+
+def _renderable(text: str) -> str:
+    """Reduce text to what the report font can actually draw.
+
+    Anything with no WinAnsi equivalent becomes "?" rather than being dropped, so a reader can see
+    that the source held a character this document could not reproduce.
+    """
+    if text.isascii():
+        return text
+    out: list[str] = []
+    for character in text:
+        character = _FONT_SUBSTITUTIONS.get(character, character)
+        try:
+            character.encode("cp1252")
+        except UnicodeEncodeError:
+            character = "?"
+        out.append(character)
+    return "".join(out)
+
+
 def _safe(value: object) -> str:
-    return str(value or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # `value or ""` swallowed every zero, so a count of 0 rendered as an empty cell rather than
+    # as the fact that there are none.
+    text = "" if value is None else str(value)
+    text = _renderable(text)
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _timestamp_parts(value: object) -> tuple[str, str] | None:
@@ -151,11 +289,15 @@ def _source_time_from_description(description: object) -> str | None:
     return datetime(2000, 1, 1, hour, minute).strftime("%I:%M %p").lstrip("0")
 
 
-def _event_timestamp_parts(event: dict) -> tuple[str, str] | None:
-    """Prefer the stored event time; use a labelled source time only for a date-only midnight placeholder."""
+def _event_timestamp_parts(event: dict) -> tuple[str | None, str | None] | None:
+    """Prefer the stored event time; use a labelled source time only for a date-only placeholder."""
     parts = _timestamp_parts(event.get("time"))
     if not parts:
-        return None
+        # No datetime was established. The source may still have shown a clock reading — a chat
+        # bubble stamped "5:45 pm" under a "Today" divider states a time but never a date — and
+        # printing that reading is honest where inventing a date would not be.
+        observed = event.get("original_time") or _source_time_from_description(event.get("description"))
+        return (None, str(observed)) if observed else None
     date_label, time_label = parts
     source_time = _source_time_from_description(event.get("description"))
     if time_label == "12:00 AM" and source_time:
@@ -163,14 +305,29 @@ def _event_timestamp_parts(event: dict) -> tuple[str, str] | None:
     return parts
 
 
+def _format_event_time(parts: tuple[str | None, str | None] | None) -> str:
+    if not parts:
+        return "Time not established"
+    date_label, time_label = parts
+    if date_label and time_label:
+        return f"{date_label} at {time_label}"
+    if time_label:
+        return f"{time_label} (date not established)"
+    return date_label or "Time not established"
+
+
 def _event_timestamp_cell(event: dict) -> Paragraph:
     parts = _event_timestamp_parts(event)
-    return _cell_lines(*parts) if parts else _cell("Time not established")
+    if not parts:
+        return _cell("Time not established")
+    date_label, time_label = parts
+    if date_label is None:
+        return _cell_lines(time_label, "date not established")
+    return _cell_lines(date_label, time_label)
 
 
 def _display_event_timestamp(event: dict) -> str:
-    parts = _event_timestamp_parts(event)
-    return " at ".join(parts) if parts else "Time not established"
+    return _format_event_time(_event_timestamp_parts(event))
 
 
 def _report_table_style(*, header: str = "burgundy", padded: float = 4.0, alternate: bool = True) -> TableStyle:
@@ -310,6 +467,119 @@ def _render_donut(path: Path, title: str, values: Counter[str]) -> Path | None:
     return path
 
 
+def _render_connection_graph(db: Session, case_id: str, output: Path) -> tuple[Path | None, dict]:
+    """Draw what links the evidence: files on the left, shared identifiers on the right.
+
+    The previous drawing was a four-lane provenance flow — evidence, event, transaction,
+    identifier — which rendered a hundred nodes and answered a question nobody asks. Only an
+    identifier found in more than one file can connect anything, so only those are drawn, and the
+    line weight carries how specific the shared value is.
+    """
+    projection = build_connection_graph(db, case_id)
+    identifiers = [node for node in projection["nodes"] if node["kind"] == "identifier"]
+    evidence_nodes = [node for node in projection["nodes"] if node["kind"] == "evidence"]
+    summary = projection["summary"]
+
+    metrics = {
+        "evidence_count": summary["evidence_count"],
+        "connected_evidence": summary["connected_evidence"],
+        "bridge_count": summary["bridge_count"],
+        "isolated_count": len(summary["isolated_evidence"]),
+        "connections": describe_connections(db, case_id),
+    }
+    if not identifiers:
+        return None, metrics
+
+    # Keep the picture legible: a page can carry about a dozen bridges before it turns to soup.
+    identifiers = identifiers[:12]
+    shown = {node["id"] for node in identifiers}
+    edges = [edge for edge in projection["edges"] if edge["source"] in shown]
+    linked_evidence = {edge["target"] for edge in edges}
+    evidence_nodes = [node for node in evidence_nodes if node["id"] in linked_evidence]
+
+    band_colour = {"strong": "#7b1e2b", "moderate": "#b17a2d", "weak": "#8b8175"}
+    height = max(5.2, 0.62 * max(len(identifiers), len(evidence_nodes)) + 2.0)
+    figure, axis = plt.subplots(figsize=(13.5, height), dpi=220)
+    figure.patch.set_facecolor("#fbf5ec")
+    axis.set_facecolor("#fbf5ec")
+
+    def _lane(items: list[dict], x: float) -> dict[str, tuple[float, float]]:
+        spacing = 1.0
+        offset = (len(items) - 1) / 2
+        return {item["id"]: (x, (offset - index) * spacing) for index, item in enumerate(items)}
+
+    left = _lane(evidence_nodes, 0.0)
+    right = _lane(identifiers, 1.0)
+    position = {**left, **right}
+
+    for edge in edges:
+        start, end = position.get(edge["target"]), position.get(edge["source"])
+        if not start or not end:
+            continue
+        axis.annotate(
+            "",
+            xy=end,
+            xytext=start,
+            arrowprops={
+                "arrowstyle": "-",
+                "color": band_colour.get(edge.get("strength_band", "weak"), "#8b8175"),
+                "alpha": 0.55,
+                "linewidth": 1.0 + 1.8 * float(edge.get("strength", 0.5)),
+                "connectionstyle": "arc3,rad=0.12",
+                "linestyle": "--" if edge.get("link_style") == "dashed" else "-",
+            },
+        )
+
+    for node in evidence_nodes:
+        x, y = position[node["id"]]
+        axis.scatter([x], [y], s=520, c="#e6d7bd", edgecolors="#4b1821", linewidths=1.1, zorder=3)
+        axis.text(x - 0.045, y, _shorten(node["label"], 34), ha="right", va="center", fontsize=8.5, color="#3a2f28")
+        axis.text(x - 0.045, y - 0.26, f"{node['bridge_count']} shared", ha="right", va="center", fontsize=7, color="#8a7c6f")
+
+    for node in identifiers:
+        x, y = position[node["id"]]
+        colour = band_colour.get(node["strength_band"], "#8b8175")
+        axis.scatter([x], [y], s=560, c=colour, edgecolors="#4b1821", linewidths=1.1, zorder=3)
+        axis.text(x + 0.045, y, _shorten(node["label"], 32), ha="left", va="center", fontsize=8.5, fontweight="bold", color="#3a2f28")
+        axis.text(
+            x + 0.045,
+            y - 0.26,
+            f"{node['identifier_type']} · in {node['evidence_count']} files · {node['strength_band']}",
+            ha="left", va="center", fontsize=7, color="#8a7c6f",
+        )
+
+    axis.text(0.0, max(len(evidence_nodes), len(identifiers)) / 2 + 0.75, "EVIDENCE FILES",
+              ha="center", fontsize=8.5, fontweight="bold", color="#4b1821")
+    axis.text(1.0, max(len(evidence_nodes), len(identifiers)) / 2 + 0.75, "SHARED IDENTIFIERS",
+              ha="center", fontsize=8.5, fontweight="bold", color="#4b1821")
+
+    # Anchored to the figure, not the axes: inside the axes it printed over the lowest node row.
+    figure.legend(
+        handles=[
+            Patch(facecolor="#e6d7bd", edgecolor="#4b1821", label="Evidence file"),
+            Patch(facecolor="#7b1e2b", edgecolor="#4b1821", label="Strong link"),
+            Patch(facecolor="#b17a2d", edgecolor="#4b1821", label="Moderate link"),
+            Patch(facecolor="#8b8175", edgecolor="#4b1821", label="Weak link"),
+        ],
+        loc="lower center", ncol=4, frameon=False, fontsize=8,
+    )
+    axis.set_xlim(-0.55, 1.55)
+    span = max(len(evidence_nodes), len(identifiers)) / 2
+    axis.set_ylim(-span - 1.0, span + 1.1)
+    axis.axis("off")
+
+    path = output.parent / f"{output.stem}-connection-graph.png"
+    figure.tight_layout(pad=1.1, rect=(0, 0.07, 1, 1))
+    figure.savefig(path, dpi=220, bbox_inches="tight", facecolor=figure.get_facecolor())
+    plt.close(figure)
+    return path, metrics
+
+
+def _shorten(text: object, limit: int) -> str:
+    value = str(text)
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
 def _render_relationship_graph(db: Session, case_id: str, output: Path) -> tuple[Path | None, dict]:
     """Render a focused, source-derived graph while retaining raw graph counts and relation rows."""
     projection = build_case_graph(db, case_id)
@@ -389,6 +659,203 @@ def _render_relationship_graph(db: Session, case_id: str, output: Path) -> tuple
     return path, metrics
 
 
+def _append_connection_section(story: list[object], styles, snapshot: dict) -> None:
+    """Say, in words, what ties the evidence together — before drawing anything.
+
+    A reader should learn which files are connected and by what without having to interpret a
+    diagram, so the sentences come first and the graph illustrates them afterwards.
+    """
+    connections = snapshot.get("connections") or []
+    summary = snapshot.get("connection_summary") or {}
+
+    story.extend([PageBreak(), Paragraph("How this evidence connects", styles["Heading1"])])
+
+    total = summary.get("evidence_count", 0)
+    connected = summary.get("connected_evidence", 0)
+    isolated = summary.get("isolated_evidence") or []
+
+    if not connections:
+        story.append(
+            Paragraph(
+                f"No identifier is shared between any two of the {total} evidence items in this case. "
+                "That is a finding in itself: on the material available, these files do not link to one another.",
+                styles["BodyText"],
+            )
+        )
+        return
+
+    story.append(
+        Paragraph(
+            f"<b>{connected} of {total}</b> evidence items are connected to at least one other, through "
+            f"<b>{summary.get('bridge_count', 0)}</b> shared identifier(s). Each link below is an exact match on a "
+            "value that appears in more than one file. A shared identifier links the <b>files</b>; it does not by "
+            "itself establish that the same person is behind them.",
+            styles["BodyText"],
+        )
+    )
+    story.append(Spacer(1, 4 * mm))
+
+    for item in connections:
+        story.append(Paragraph("• " + _safe(item["sentence"]), styles["BodyText"]))
+        story.append(Paragraph("<font size=7 color='#6b6258'>" + _safe(item["caveat"]) + "</font>", styles["BodyText"]))
+        story.append(Spacer(1, 2.5 * mm))
+
+    rows = [[_cell("Shared value"), _cell("Type"), _cell("Appears in"), _cell("Evidence items"), _cell("Link strength")]]
+    for item in connections:
+        rows.append([
+            _cell(item["identifier"]),
+            _cell(item["identifier_label"]),
+            _cell(str(item["evidence_count"]) + " files"),
+            _cell(", ".join(item["evidence_names"])),
+            _cell(item["strength_band"]),
+        ])
+    table = Table(rows, colWidths=[42 * mm, 26 * mm, 20 * mm, 68 * mm, 22 * mm], repeatRows=1)
+    table.setStyle(_report_table_style(header="burgundy"))
+    story.extend([Spacer(1, 2 * mm), table, Spacer(1, 4 * mm)])
+
+    if isolated:
+        story.append(
+            Paragraph(
+                "<b>Not connected to anything:</b> "
+                + _safe(", ".join(item["label"] for item in isolated))
+                + ". No identifier from these files was found elsewhere in the case.",
+                styles["BodyText"],
+            )
+        )
+
+    story.append(Spacer(1, 2 * mm))
+    story.append(
+        Paragraph(
+            "<font size=7 color='#6b6258'>Link strength reflects how specific the shared value is and how many "
+            "separate files carry it. A transaction reference shared across three files is strong; a shared first "
+            "name is weak. Strength is not a probability, and no link here has been confirmed by a reviewer.</font>",
+            styles["BodyText"],
+        )
+    )
+
+
+_BASIS_LABEL = {
+    "direct": "Directly observed",
+    "direct_visual": "Directly observed (layout)",
+    "inferred": "Contextual inference",
+    "unknown": "Not established",
+}
+
+
+def _grounded_field(value: object, basis: str) -> str:
+    """Render a field so an inference can never be mistaken for an observation."""
+    if value in (None, "", []):
+        return "Not established by this source"
+    if basis in {"inferred", "unknown"}:
+        return f"{value} (inferred — requires verification)"
+    return str(value)
+
+
+def _append_grounded_sections(story: list[object], styles, snapshot: dict) -> None:
+    """Render the model-assisted layer separately from deterministic observations."""
+    records = snapshot.get("grounded_records") or []
+    relations = snapshot.get("candidate_relations") or []
+    if not records and not relations:
+        return
+
+    bands = Counter(item["band"] for item in records)
+    models = sorted({item["model"] for item in records if item["model"]})
+    review_count = sum(1 for item in records if item["requires_review"])
+
+    story.extend(
+        [
+            PageBreak(),
+            Paragraph("Source-grounded evidence intelligence", styles["Heading1"]),
+            Paragraph(
+                "Each row below was read from one evidence item and carries its own basis, confidence "
+                "and review state. Values marked <b>inferred</b> are contextual readings, not established "
+                "facts; values marked <b>not established</b> were deliberately left empty because the "
+                "source does not support them. Nothing here asserts identity, intent or culpability.",
+                styles["BodyText"],
+            ),
+            Spacer(1, 3 * mm),
+        ]
+    )
+
+    summary = [[
+        _cell_lines(len(records), "Grounded records"),
+        _cell_lines(bands.get("high", 0), "High confidence"),
+        _cell_lines(bands.get("medium", 0) + bands.get("low", 0) + bands.get("unknown", 0), "Medium / low / unknown"),
+        _cell_lines(review_count, "Awaiting review"),
+    ]]
+    summary_table = Table(summary, colWidths=[45 * mm] * 4)
+    summary_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), PAPER_ALT), ("BOX", (0, 0), (-1, -1), .5, BURGUNDY), ("INNERGRID", (0, 0), (-1, -1), .25, RULE), ("PADDING", (0, 0), (-1, -1), 6)]))
+    story.extend([summary_table, Spacer(1, 4 * mm)])
+
+    if models:
+        story.extend([
+            Paragraph(f"Model-assisted normalization performed by: <b>{_safe(', '.join(models))}</b>. "
+                      "Deterministic parser values were never replaced by model output.", styles["BodyText"]),
+            Spacer(1, 3 * mm),
+        ])
+
+    rows = [[_cell("Source"), _cell("What the source shows"), _cell("Event"), _cell("Sender"), _cell("Receiver"), _cell("Amount"), _cell("Confidence")]]
+    for item in records:
+        amount = f"{item['currency'] or ''} {item['amount']:,.2f}".strip() if item["amount"] is not None else "Not established"
+        confidence = f"{_safe(item['band'])} / {_safe(item['validation_status'])}"
+        if item["requires_review"]:
+            confidence += " · review required"
+        rows.append([
+            _cell(item["source"]),
+            _cell(item["summary"] or (item["observed_text"] or "")[:300] or "—"),
+            _cell(_grounded_field(item["event_type"], item["basis"])),
+            _cell(_grounded_field(item["sender"], item["basis"])),
+            _cell(_grounded_field(item["receiver"], item["basis"])),
+            _cell(amount),
+            _cell(confidence),
+        ])
+    table = Table(rows, colWidths=[26 * mm, 52 * mm, 26 * mm, 26 * mm, 26 * mm, 22 * mm, 24 * mm], repeatRows=1)
+    table.setStyle(_report_table_style(header="charcoal"))
+    story.extend([table, Spacer(1, 4 * mm)])
+
+    conflicted = [item for item in records if item["conflicts"]]
+    if conflicted:
+        story.append(Paragraph("Preserved conflicts", styles["Heading2"]))
+        story.append(Paragraph(
+            "Two readings of the same field disagreed. Both were kept and no automatic resolution was applied.",
+            styles["BodyText"],
+        ))
+        for item in conflicted:
+            story.append(Paragraph(f"<b>{_safe(item['source'])}</b> — conflicting: {_safe(', '.join(item['conflicts']))}", styles["BodyText"]))
+        story.append(Spacer(1, 3 * mm))
+
+    if relations:
+        story.extend([
+            Paragraph("Candidate corroborations and contradictions", styles["Heading2"]),
+            Paragraph(
+                "These are candidate links produced by identifier matching. They remain candidates until a "
+                "reviewer confirms them, and they do not establish a relationship between people.",
+                styles["BodyText"],
+            ),
+            Spacer(1, 2 * mm),
+        ])
+        relation_rows = [[_cell("Type"), _cell("Matched on"), _cell("Basis"), _cell("Confidence"), _cell("Status")]]
+        for item in relations[:40]:
+            relation_rows.append([
+                _cell(item["type"]),
+                _cell(", ".join(item["fields"]) or "—"),
+                _cell(item["method"]),
+                _cell(f"{item['confidence']:.2f}"),
+                _cell(item["status"] + (" · review required" if item["requires_review"] else "")),
+            ])
+        relation_table = Table(relation_rows, colWidths=[30 * mm, 48 * mm, 30 * mm, 26 * mm, 48 * mm], repeatRows=1)
+        relation_table.setStyle(_report_table_style(header="burgundy"))
+        story.extend([relation_table, Spacer(1, 4 * mm)])
+
+    unresolved = [item for item in records if not item["sender"] or not item["receiver"]]
+    if unresolved:
+        story.append(Paragraph(
+            f"<b>{len(unresolved)} of {len(records)}</b> grounded records do not establish both parties. "
+            "Recipient or sender identity was left unset rather than inferred.",
+            styles["BodyText"],
+        ))
+
+
 def generate_report(report_id: str) -> dict:
     """Render a fresh PDF from the report’s current snapshot—never from a static document template alone."""
     from app.core.db import SessionLocal
@@ -437,7 +904,7 @@ def generate_report(report_id: str) -> dict:
         alert_records = db.scalars(select(Alert).where(Alert.case_id == report.case_id)).all()
         claim_records = db.scalars(select(Claim).where(Claim.case_id == report.case_id).order_by(Claim.created_at)).all()
         contradiction_records = db.scalars(select(Contradiction).where(Contradiction.case_id == report.case_id).order_by(Contradiction.created_at)).all()
-        entities_by_type = Counter(item.entity_type.replace("_", " ").title() for item in entity_records)
+        entities_by_type = Counter(label for item in entity_records if (label := _entity_display(item.entity_type)))
         alerts_by_severity = Counter(item.severity.value for item in alert_records)
         entity_chart = _render_bar_chart(output.parent / f"{output.stem}-entities.png", "Extracted entities by type", list(entities_by_type), list(entities_by_type.values()), "#59636a", "Entities")
         alert_donut = _render_donut(output.parent / f"{output.stem}-alerts.png", "Alert severity distribution", alerts_by_severity)
@@ -474,7 +941,12 @@ def generate_report(report_id: str) -> dict:
         if alert_donut:
             story.extend([Spacer(1, 3 * mm), Image(str(alert_donut), width=100 * mm, height=86 * mm)])
         known_events = [item for item in snapshot["events"] if item["time"]]
-        unknown_events = [item for item in snapshot["events"] if not item["time"]]
+        # An event with a clock reading but no date cannot be placed in the chronology, yet the
+        # reading itself is real and belongs in the report rather than being flattened into
+        # "Time not established" alongside records that carry no time at all.
+        undated = [item for item in snapshot["events"] if not item["time"]]
+        partial_events = [item for item in undated if _event_timestamp_parts(item)]
+        unknown_events = [item for item in undated if not _event_timestamp_parts(item)]
         story.extend([PageBreak(), Paragraph("Investigation timeline", styles["Heading1"]), Paragraph("Chronology established", styles["Heading2"])])
         overview = [[_cell("Time"), _cell("Event type"), _cell("Review state")]] + [[_event_timestamp_cell(item), _cell(item["type"]), _cell(item["review"])] for item in known_events[:10]]
         overview_table = Table(overview, colWidths=[42 * mm, 94 * mm, 46 * mm], repeatRows=1)
@@ -484,63 +956,131 @@ def generate_report(report_id: str) -> dict:
             time_label = _display_event_timestamp(item)
             story.append(Paragraph(f"<b>{_safe(time_label)}</b> — {_safe(item['type'])} ({_safe(item['review'])}): {_safe(item['description'])}", styles["BodyText"]))
             story.append(Spacer(1, 1.5 * mm))
+        if partial_events:
+            story.extend([Spacer(1, 4 * mm), Paragraph("Time of day observed, date not established", styles["Heading2"]), Paragraph("The source shows a clock reading but never states which day it belongs to, so these records are not placed in the chronology above.", styles["BodyText"])])
+            for item in partial_events:
+                story.append(Paragraph(f"<b>{_safe(_display_event_timestamp(item))}</b> — {_safe(item['type'])} ({_safe(item['review'])}): {_safe(_shorten(item['description'], 400))}", styles["BodyText"]))
+                story.append(Spacer(1, 1.5 * mm))
         if unknown_events:
             story.extend([PageBreak(), Paragraph("Time not established", styles["Heading1"]), Paragraph("The following source-linked records are retained but are not presented as exact chronology.", styles["BodyText"])])
             for item in unknown_events:
-                story.append(Paragraph(f"<b>{_safe(item['type'])}</b> ({_safe(item['review'])}): {_safe(item['description'])}", styles["BodyText"]))
+                story.append(Paragraph(f"<b>{_safe(item['type'])}</b> ({_safe(item['review'])}): {_safe(_shorten(item['description'], 400))}", styles["BodyText"]))
                 story.append(Spacer(1, 1.5 * mm))
-        graph_image, graph_metrics = _render_relationship_graph(db, report.case_id, output)
+        graph_image, graph_metrics = _render_connection_graph(db, report.case_id, output)
+        lineage_metrics = build_case_graph(db, report.case_id)["metrics"]
+        graph_metrics = {**lineage_metrics, **graph_metrics}
         if graph_image:
-            graph_strip = [[_cell_lines(graph_metrics["node_count"], "Nodes"), _cell_lines(graph_metrics["edge_count"], "Relationships"), _cell_lines(graph_metrics["evidence_sources"], "Evidence sources"), _cell_lines(graph_metrics["repeated_identifiers"], "Repeated identifiers"), _cell_lines(graph_metrics["high_connectivity"], "Highly connected")]]
-            graph_strip_table = Table(graph_strip, colWidths=[36 * mm] * 5)
+            graph_strip = [[_cell_lines(f"{graph_metrics['connected_evidence']} of {graph_metrics['evidence_count']}", "Files connected"), _cell_lines(graph_metrics["bridge_count"], "Shared identifiers"), _cell_lines(graph_metrics["isolated_count"], "Files linked to nothing")]]
+            graph_strip_table = Table(graph_strip, colWidths=[59 * mm] * 3)
             graph_strip_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f7efe5")), ("BOX", (0, 0), (-1, -1), .5, colors.HexColor("#7b1e2b")), ("INNERGRID", (0, 0), (-1, -1), .25, colors.HexColor("#d7c7b7")), ("PADDING", (0, 0), (-1, -1), 6)]))
-            story.extend([PageBreak(), Paragraph("Entity relationship graph", styles["Heading1"]), Paragraph(f"Readable evidence-focused view of the complete backend graph. The visual displays {graph_metrics['focus_node_count']} high-value nodes and {graph_metrics['focus_edge_count']} relationships; {graph_metrics['compacted_node_count']} supporting nodes remain counted and are retained in the complete source-linked relationship register that follows.", styles["BodyText"]), Spacer(1, 3 * mm), graph_strip_table, Spacer(1, 3 * mm), Image(str(graph_image), width=178 * mm, height=100 * mm), Paragraph("Legend: parchment = evidence; graphite = event; ochre = transaction; burgundy = key identifiers; blue-gray = email/URL. Directed edges show source/derived relationship flow. The next page retains the complete raw relationship register.", styles["BodyText"])])
-            story.extend([PageBreak(), Paragraph("Key relationships & source-linked graph metadata", styles["Heading1"]), Paragraph("Reading aid only; not a conclusion about intent, identity or culpability.", styles["BodyText"])])
-            graph_rows = [[_cell("From"), _cell("Relationship"), _cell("To"), _cell("Source-linked path")]]
-            for edge in graph_metrics["edges"][:14]:
-                source, target = edge["source"], edge["target"]
-                graph_rows.append([_cell(str(graph_metrics["labels"].get(source, source))[:42]), _cell(edge.get("relationship", "source-linked")), _cell(str(graph_metrics["labels"].get(target, target))[:42]), _cell(f"{source[:8]} → {target[:8]}")])
-            graph_table = Table(graph_rows, colWidths=[53 * mm, 32 * mm, 53 * mm, 44 * mm], repeatRows=1)
-            graph_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("PADDING", (0, 0), (-1, -1), 4), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
-            story.append(graph_table)
+            story.extend([PageBreak(), Paragraph("Entity relationship graph", styles["Heading1"]), Paragraph("Each line joins an evidence file to a value found inside it. Only values that appear in more than one file are drawn, because only those connect anything. A shared identifier links the files; it does not by itself establish that the same person is behind them.", styles["BodyText"]), Spacer(1, 3 * mm), graph_strip_table, Spacer(1, 3 * mm), Image(str(graph_image), width=178 * mm, height=104 * mm), Paragraph("Line weight and colour show how specific the shared value is: a transaction reference carried by three files is strong, a shared name is weak. Dashed lines are inferred candidates, not exact matches. The register that follows lists the underlying source-linked relationships in full.", styles["BodyText"])])
+        # The graph shows the links; this says what they are in words. Separating them meant the
+        # picture arrived on one page and its explanation on another.
+        _append_connection_section(story, styles, snapshot)
+
+        # "Documented amount" read as a loss figure, which is not what the arithmetic produces. The
+        # sum counts a balance quoted in a message beside a payment recorded on a receipt, and counts
+        # the same payment twice when two files describe it. The figure is still worth showing — it
+        # bounds what the evidence talks about — but it is labelled as what it is, and the caveat
+        # below the strip says so in words rather than leaving the reader to assume.
+        #
+        # Totalling across currencies would state a sum nobody can act on, so the strip names the
+        # currency only when the case has exactly one.
+        currencies = {(item.currency or "INR") for item in transaction_records}
+        total_currency = currencies.pop() if len(currencies) == 1 else None
+        currencies.clear()
         total_amount = sum(float(item.amount) for item in transaction_records)
         sender_count = len({item.sender_value for item in transaction_records if item.sender_value})
         receiver_count = len({item.receiver_value for item in transaction_records if item.receiver_value})
         unresolved = sum(1 for item in transaction_records if not item.sender_value or not item.receiver_value)
-        txn_strip = [[_cell_lines(len(transaction_records), "Transactions"), _cell_lines(f"INR {total_amount:,.0f}", "Documented amount"), _cell_lines(sender_count, "Distinct senders"), _cell_lines(receiver_count, "Distinct receivers"), _cell_lines(unresolved, "Unresolved parties")]]
+        txn_strip = [[_cell_lines(len(transaction_records), "Transactions"), _cell_lines(f"{total_currency} {total_amount:,.0f}" if total_currency else "Mixed currencies", "Sum of figures read"), _cell_lines(sender_count, "Distinct senders"), _cell_lines(receiver_count, "Distinct receivers"), _cell_lines(unresolved, "Unresolved parties")]]
         story.extend([PageBreak(), Paragraph("Transaction trail", styles["Heading1"]), Table(txn_strip, colWidths=[36 * mm] * 5, style=[("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f7efe5")), ("BOX", (0, 0), (-1, -1), .5, colors.HexColor("#7b1e2b")), ("INNERGRID", (0, 0), (-1, -1), .25, colors.HexColor("#d7c7b7")), ("PADDING", (0, 0), (-1, -1), 6)]), Spacer(1, 5 * mm)])
-        txn_table = [[_cell("Time"), _cell("Amount"), _cell("Sender"), _cell("Receiver"), _cell("Reference")]] + [[(_timestamp_cell(item["time"]) if item["time"] else _cell("Unknown")), _cell(f"INR {item['amount']:,.2f}"), _cell(item["sender"] or "Not extracted"), _cell(item["receiver"] or "Not extracted"), _cell(item["reference"] or "Not extracted")] for item in snapshot["transactions"]]
+        balances = [item for item in snapshot["grounded_records"] if item.get("amount_role") == "balance" and item["amount"] is not None]
+        story.append(
+            Paragraph(
+                "The sum above adds the figures in this trail exactly as they were read. Balances are "
+                "excluded and listed separately below, but a sum demanded and the payment that answered "
+                "it are both counted, and one payment described in two files is counted twice. This is "
+                "not a loss total; each row should be checked against its source before it is relied on.",
+                styles["BodyText"],
+            )
+        )
+        story.append(Spacer(1, 3 * mm))
+        txn_table = [[_cell("Time"), _cell("Amount"), _cell("Sender"), _cell("Receiver"), _cell("Reference")]] + [[(_timestamp_cell(item["time"]) if item["time"] else _cell("Unknown")), _cell(f"{item['currency']} {item['amount']:,.2f}"), _cell(item["sender"] or "Not extracted"), _cell(item["receiver"] or "Not extracted"), _cell(item["reference"] or "Not extracted")] for item in snapshot["transactions"]]
         txn = Table(txn_table, colWidths=[38 * mm, 30 * mm, 40 * mm, 40 * mm, 35 * mm], repeatRows=1)
         txn.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#3d4952")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4)]))
         story.append(txn)
-        story.extend([PageBreak(), Paragraph("Transaction flow & analytics", styles["Heading1"]), Paragraph("Known values are shown as extracted. Missing counterparties remain explicitly marked as not extracted.", styles["BodyText"])])
-        flow_rows = [[_cell("Sender"), _cell("Amount"), _cell("Reference"), _cell("Receiver")]]
-        flow_rows += [[_cell(item.sender_value or "Not extracted"), _cell(f"INR {float(item.amount):,.2f}"), _cell(item.reference_id or "Reference not extracted"), _cell(item.receiver_value or "Not extracted")] for item in transaction_records]
-        flow = Table(flow_rows, colWidths=[47 * mm, 32 * mm, 52 * mm, 51 * mm], repeatRows=1)
-        flow.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#f7efe5")), ("BOX", (0, 0), (-1, -1), .5, colors.HexColor("#7b1e2b")), ("INNERGRID", (0, 0), (-1, -1), .25, colors.HexColor("#d7c7b7")), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("PADDING", (0, 0), (-1, -1), 4)]))
-        story.extend([flow, Spacer(1, 4 * mm)])
+        story.append(Spacer(1, 5 * mm))
+        if balances:
+            # These figures were read from the evidence but describe a position, not a transfer, so
+            # they are listed apart from the trail rather than dropped or counted as payments.
+            balance_rows = [[_cell("Source"), _cell("Figure"), _cell("Quoted as")]]
+            balance_rows += [
+                [
+                    _cell(item["source"]),
+                    _cell(f"{item['currency'] or ''} {item['amount']:,.2f}".strip()),
+                    _cell(_shorten(item["summary"] or item["observed_text"], 150)),
+                ]
+                for item in balances
+            ]
+            balance_table = Table(balance_rows, colWidths=[52 * mm, 32 * mm, 99 * mm], repeatRows=1)
+            balance_table.setStyle(_report_table_style(header="charcoal"))
+            story.extend([
+                Paragraph("Balances quoted in the evidence", styles["Heading2"]),
+                Paragraph(
+                    "A balance states what an account was said to hold. It is not a payment and is not "
+                    "included in the transaction trail above, because nothing in the evidence shows this "
+                    "money moving.",
+                    styles["BodyText"],
+                ),
+                Spacer(1, 2 * mm),
+                balance_table,
+                Spacer(1, 5 * mm),
+            ])
         if transaction_chart:
             story.append(Image(str(transaction_chart), width=178 * mm, height=78 * mm))
-        story.extend([PageBreak(), Paragraph("Alerts, corroboration & review context", styles["Heading1"]), Paragraph("Alerts are reviewable rule-based leads, not a conclusion about intent, identity, truthfulness or culpability.", styles["BodyText"])])
-        alert_summary = [[_cell_lines(len(alert_records), "Total alerts"), _cell_lines(sum(1 for item in alert_records if item.status.value == "reviewed"), "Reviewed"), _cell_lines(sum(1 for item in alert_records if item.status.value == "open"), "Open"), _cell_lines(sum(1 for item in alert_records if item.severity.value in {"high", "critical"}), "High / critical")]]
-        alert_summary_table = Table(alert_summary, colWidths=[45 * mm] * 4)
-        alert_summary_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f7efe5")), ("BOX", (0, 0), (-1, -1), .5, colors.HexColor("#7b1e2b")), ("INNERGRID", (0, 0), (-1, -1), .25, colors.HexColor("#d7c7b7")), ("PADDING", (0, 0), (-1, -1), 6)]))
-        story.extend([alert_summary_table, Spacer(1, 5 * mm)])
-        for item in snapshot["alerts"]:
-            story.append(Paragraph(f"<b>{_safe(item['severity']).upper()} · {_safe(item['rule'])} · {_safe(item['status'])}</b><br/>{_safe(item['explanation'])}", styles["BodyText"]))
-            story.append(Spacer(1, 2 * mm))
-        story.extend([Spacer(1, 4 * mm), Paragraph("Claims, contradictions and reviewable gaps", styles["Heading2"]), Paragraph("This report preserves source-linked patterns and review states. Multiple files are not automatically treated as independent sources; no corroboration or contradiction is asserted unless the backend has explicitly produced that relationship.", styles["BodyText"])])
-        claim_rows = [[_cell("Claim type"), _cell("Statement"), _cell("Evidence state")]] + [[_cell(item.claim_type), _cell(item.statement), _cell(item.status.value)] for item in claim_records]
-        if len(claim_rows) == 1:
-            claim_rows.append([_cell("—"), _cell("No structured claim has been recorded for this case snapshot."), _cell("—")])
-        claim_table = Table(claim_rows, colWidths=[34 * mm, 112 * mm, 36 * mm], repeatRows=1)
-        claim_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4), ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#fbf5ec"))]))
-        contradiction_rows = [[_cell("Subject"), _cell("Documented difference"), _cell("Status")]] + [[_cell(item.subject), _cell(item.description), _cell(item.status.value)] for item in contradiction_records]
-        if len(contradiction_rows) == 1:
-            contradiction_rows.append([_cell("—"), _cell("No structured contradiction has been recorded by the current comparison workflow."), _cell("—")])
-        contradiction_table = Table(contradiction_rows, colWidths=[42 * mm, 104 * mm, 36 * mm], repeatRows=1)
-        contradiction_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#3d4952")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4), ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#fbf5ec"))]))
-        story.extend([Spacer(1, 4 * mm), Paragraph("Claim support and source posture", styles["Heading2"]), claim_table, Spacer(1, 4 * mm), Paragraph("Structured contradictions", styles["Heading2"]), contradiction_table])
+        # Where every figure above came from, with its quote, basis and confidence. This is the part
+        # a reviewer checks the rest of the report against, so it comes before the housekeeping.
+        _append_grounded_sections(story, styles, snapshot)
+
+        # An empty finding is still a finding, but it does not need a page of zeros and a table of
+        # em-dashes to say so. Alerts, claims and contradictions now share one page, and each part
+        # shrinks to a sentence when the case has nothing of that kind recorded.
+        story.extend([PageBreak(), Paragraph("Alerts, claims and contradictions", styles["Heading1"])])
+        if alert_records:
+            story.extend([Paragraph("Rule-based alerts", styles["Heading2"]), Paragraph("Alerts are reviewable rule-based leads, not a conclusion about intent, identity, truthfulness or culpability.", styles["BodyText"])])
+            alert_summary = [[_cell_lines(len(alert_records), "Total alerts"), _cell_lines(sum(1 for item in alert_records if item.status.value == "reviewed"), "Reviewed"), _cell_lines(sum(1 for item in alert_records if item.status.value == "open"), "Open"), _cell_lines(sum(1 for item in alert_records if item.severity.value in {"high", "critical"}), "High / critical")]]
+            alert_summary_table = Table(alert_summary, colWidths=[45 * mm] * 4)
+            alert_summary_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f7efe5")), ("BOX", (0, 0), (-1, -1), .5, colors.HexColor("#7b1e2b")), ("INNERGRID", (0, 0), (-1, -1), .25, colors.HexColor("#d7c7b7")), ("PADDING", (0, 0), (-1, -1), 6)]))
+            story.extend([alert_summary_table, Spacer(1, 5 * mm)])
+            for item in snapshot["alerts"]:
+                story.append(Paragraph(f"<b>{_safe(item['severity']).upper()} · {_safe(item['rule'])} · {_safe(item['status'])}</b><br/>{_safe(item['explanation'])}", styles["BodyText"]))
+                story.append(Spacer(1, 2 * mm))
+        else:
+            story.append(Paragraph("No rule-based alert was raised against this case snapshot.", styles["BodyText"]))
+        if claim_records or contradiction_records:
+            story.extend([Spacer(1, 4 * mm), Paragraph("Claims and contradictions", styles["Heading2"]), Paragraph("This report preserves source-linked patterns and review states. Multiple files are not automatically treated as independent sources; no corroboration or contradiction is asserted unless the backend has explicitly produced that relationship.", styles["BodyText"])])
+            claim_rows = [[_cell("Claim type"), _cell("Statement"), _cell("Evidence state")]] + [[_cell(item.claim_type), _cell(item.statement), _cell(item.status.value)] for item in claim_records]
+            if len(claim_rows) == 1:
+                claim_rows.append([_cell("—"), _cell("No structured claim has been recorded for this case snapshot."), _cell("—")])
+            claim_table = Table(claim_rows, colWidths=[34 * mm, 112 * mm, 36 * mm], repeatRows=1)
+            claim_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4), ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#fbf5ec"))]))
+            contradiction_rows = [[_cell("Subject"), _cell("Documented difference"), _cell("Status")]] + [[_cell(item.subject), _cell(item.description), _cell(item.status.value)] for item in contradiction_records]
+            if len(contradiction_rows) == 1:
+                contradiction_rows.append([_cell("—"), _cell("No structured contradiction has been recorded by the current comparison workflow."), _cell("—")])
+            contradiction_table = Table(contradiction_rows, colWidths=[42 * mm, 104 * mm, 36 * mm], repeatRows=1)
+            contradiction_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#3d4952")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4), ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#fbf5ec"))]))
+            story.extend([Spacer(1, 4 * mm), Paragraph("Claim support and source posture", styles["Heading2"]), claim_table, Spacer(1, 4 * mm), Paragraph("Structured contradictions", styles["Heading2"]), contradiction_table])
+        else:
+            story.append(
+                Paragraph(
+                    "No structured claim or contradiction has been recorded for this case snapshot. "
+                    "Multiple files are not automatically treated as independent sources; corroboration "
+                    "and contradiction are asserted only when the backend has explicitly produced that "
+                    "relationship.",
+                    styles["BodyText"],
+                )
+            )
         audit_rows = db.scalars(select(AuditLog).where(AuditLog.case_id == report.case_id).order_by(AuditLog.created_at)).all()
         reviews = db.scalars(select(ReviewDecision).where(ReviewDecision.case_id == report.case_id).order_by(ReviewDecision.created_at)).all()
         runs = db.scalars(select(ProcessingRun).join(EvidenceFile).where(EvidenceFile.case_id == report.case_id).order_by(ProcessingRun.created_at)).all()
@@ -554,21 +1094,24 @@ def generate_report(report_id: str) -> dict:
         hashes += [[_cell(item.id[:8]), _cell("Recorded"), _timestamp_cell(item.uploaded_at), _cell("Recorded" if item.sha256 else "Needs attention")] for item in db.scalars(select(EvidenceFile).where(EvidenceFile.case_id == report.case_id).order_by(EvidenceFile.uploaded_at)).all()]
         hash_table = Table(hashes, colWidths=[25 * mm, 88 * mm, 36 * mm, 33 * mm], repeatRows=1)
         hash_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4), ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#fbf5ec"))]))
-        story.extend([hash_table, PageBreak(), Paragraph("Evidence and review history", styles["Heading1"]), Paragraph("EVIDENCE RECEIVED   â†“   CASE RECORD UPDATED   â†“   REVIEWED   â†“   REPORT INCLUDED", ParagraphStyle(name="Lifecycle", parent=styles["BodyText"], alignment=TA_CENTER, textColor=colors.HexColor("#7b1e2b"), fontName="Helvetica-Bold")), Spacer(1, 5 * mm)])
+        story.extend([hash_table, PageBreak(), Paragraph("Evidence and review history", styles["Heading1"]), Paragraph("EVIDENCE RECEIVED   →   CASE RECORD UPDATED   →   REVIEWED   →   REPORT INCLUDED", ParagraphStyle(name="Lifecycle", parent=styles["BodyText"], alignment=TA_CENTER, textColor=colors.HexColor("#7b1e2b"), fontName="Helvetica-Bold")), Spacer(1, 5 * mm)])
+        story.extend([Paragraph("Investigator review", styles["Heading2"])])
+        if reviews:
+            review_table = [[_cell("Time"), _cell("Reviewer"), _cell("Subject"), _cell("Decision"), _cell("Note")]]
+            review_table += [[_timestamp_cell(item.created_at), _cell(item.reviewer_id), _cell(f"{item.subject_type} · {item.subject_id[:8]}"), _cell(item.decision.value), _cell(item.note or "—")] for item in reviews] or [[_cell("—"), _cell("—"), _cell("No review record"), _cell("—"), _cell("—")]]
+            review_render = Table(review_table, colWidths=[28 * mm, 35 * mm, 42 * mm, 28 * mm, 49 * mm], repeatRows=1)
+            review_render.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4)]))
+            story.append(review_render)
+        else:
+            story.append(Paragraph("No investigator review decision has been recorded against this case yet.", styles["BodyText"]))
         custody = [[_cell("Time"), _cell("Actor"), _cell("Action"), _cell("Result")]]
         custody += [[_timestamp_cell(item.created_at), _cell(item.actor_id or "System"), _cell(item.action), _cell(item.outcome)] for item in audit_rows]
         custody_table = Table(custody, colWidths=[32 * mm, 38 * mm, 58 * mm, 54 * mm], repeatRows=1)
         custody_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4)]))
-        story.extend([custody_table, Spacer(1, 6 * mm), Paragraph("Investigator review", styles["Heading2"])])
-        review_table = [[_cell("Time"), _cell("Reviewer"), _cell("Subject"), _cell("Decision"), _cell("Note")]]
-        review_table += [[_timestamp_cell(item.created_at), _cell(item.reviewer_id), _cell(f"{item.subject_type} · {item.subject_id[:8]}"), _cell(item.decision.value), _cell(item.note or "—")] for item in reviews] or [[_cell("—"), _cell("—"), _cell("No review record"), _cell("—"), _cell("—")]]
-        review_render = Table(review_table, colWidths=[28 * mm, 35 * mm, 42 * mm, 28 * mm, 49 * mm], repeatRows=1)
-        review_render.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4)]))
-        story.extend([review_render, PageBreak(), Paragraph("Case record overview", styles["Heading1"]), Paragraph("This section summarizes the evidence and review activity represented in this report. It provides case context and does not decide truth, guilt, or legal admissibility.", styles["BodyText"])])
-        trust_table = [[_cell("Case record"), _cell("Current report context")], [_cell("Evidence included"), _cell(str(len(snapshot["evidence"])) + " evidence item(s) included in this report")], [_cell("Recorded actions"), _cell(str(len(audit_rows)) + " case record action(s)")], [_cell("Review decisions"), _cell(str(len(reviews)) + " decision(s) recorded for this case")], [_cell("Report context"), _cell("Prepared from the current case evidence and review records")]]
-        trust_render = Table(trust_table, colWidths=[55 * mm, 127 * mm])
-        trust_render.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 5)]))
-        story.extend([trust_render])
+        story.extend([Spacer(1, 6 * mm), Paragraph("Evidence and review log", styles["Heading2"]), custody_table])
+        # The processing manifest continues on the same page. Removing "Case record overview" left a
+        # page break with nothing behind it, which rendered as a blank sheet.
+        story.append(Spacer(1, 6 * mm))
         manifest = [[_cell("Stage"), _cell("Version"), _cell("State"), _cell("Attempt"), _cell("Completed / note")]]
         manifest += [[_cell(item.pipeline_stage), _cell(item.pipeline_version), _cell(item.state.value), _cell(str(item.attempt)), _cell((item.completed_at or item.created_at).isoformat(timespec="minutes"))] for item in runs]
         manifest_table = Table(manifest, colWidths=[37 * mm, 32 * mm, 30 * mm, 24 * mm, 59 * mm], repeatRows=1)
