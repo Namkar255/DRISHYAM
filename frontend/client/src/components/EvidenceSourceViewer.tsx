@@ -6,13 +6,21 @@
  * from, the row and column of the call record, the line of the surveillance note, the page and line
  * of the FIR. Four shapes of evidence, one panel, one gesture.
  *
- * The server decides where the highlight goes. This draws what it is given and nothing else -- when
- * the place cannot be found the panel says so plainly and marks nothing, because a box in the wrong
+ * Two marks, because a reviewer asks two questions:
+ *
+ *     cited       solid red -- the one place the stored reference points at. Provenance.
+ *     occurrence  amber     -- every other place in the same file carrying the same value. Context.
+ *
+ * And two ways to look, because a parsed grid is an interpretation however faithful: PARSED shows
+ * the structure the case was built on, ORIGINAL shows the bytes that arrived.
+ *
+ * The server decides where the marks go. This draws what it is given and nothing else -- when the
+ * place cannot be found the panel says so plainly and marks nothing, because a box in the wrong
  * place tells a reviewer they have verified something they have not.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileWarning, Loader2, Minus, Plus, X } from "lucide-react";
-import { getOriginalObjectUrl, getSourceView, type SourceTarget, type SourceViewRecord } from "@/api/sourceView";
+import { getOriginalObjectUrl, getSourceView, type SourceLine, type SourceTarget, type SourceViewRecord } from "@/api/sourceView";
 
 export type SourceRequest = {
   caseId: string;
@@ -23,12 +31,16 @@ export type SourceRequest = {
   subtitle?: string;
 };
 
+type Mode = "parsed" | "original";
+
 const KIND_LABEL: Record<string, string> = { image: "Image region", table: "Table cell", text: "Line of text" };
 
-function Chip({ tone, children }: { tone: "found" | "unfound"; children: React.ReactNode }) {
+function Chip({ tone, children }: { tone: "found" | "unfound" | "context"; children: React.ReactNode }) {
   const style = tone === "found"
     ? "border-[#c9dfcf] bg-[#f2faf3] text-[#34734b]"
-    : "border-[#ead9b8] bg-[#fff8e8] text-[#97651e]";
+    : tone === "context"
+      ? "border-[#e4d6c6] bg-[#fff6ec] text-[#8a6a3a]"
+      : "border-[#ead9b8] bg-[#fff8e8] text-[#97651e]";
   return <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] font-bold ${style}`}>{children}</span>;
 }
 
@@ -40,10 +52,11 @@ function ImageSource({ view, url }: { view: SourceViewRecord; url: string | null
   const drawn = showAll ? view.regions : marked;
   const frame = useRef<HTMLDivElement | null>(null);
 
-  // Scroll the first highlight into view, because a screenshot is usually taller than the panel.
+  // Scroll the citation into view, because a screenshot is usually taller than the panel.
   useEffect(() => {
-    if (!marked.length || !frame.current || !view.height) return;
-    const top = (marked[0].bbox[1] / view.height) * frame.current.scrollHeight;
+    const anchor = view.regions.find((region) => region.cited) ?? marked[0];
+    if (!anchor || !frame.current || !view.height) return;
+    const top = (anchor.bbox[1] / view.height) * frame.current.scrollHeight;
     frame.current.scrollTo({ top: Math.max(0, top - 120), behavior: "smooth" });
   }, [view.evidence_id, url, zoom]);
 
@@ -74,14 +87,12 @@ function ImageSource({ view, url }: { view: SourceViewRecord; url: string | null
             width: `${((x1 - x0) / view.width!) * 100}%`,
             height: `${((y1 - y0) / view.height!) * 100}%`,
           };
-          return <span
-            key={region.id}
-            title={region.text}
-            style={style}
-            className={region.highlight
-              ? "pointer-events-none absolute rounded-[3px] border-2 border-[#e0483c] bg-[#e0483c]/15 shadow-[0_0_0_9999px_rgba(20,14,11,.45)]"
-              : "pointer-events-none absolute rounded-[2px] border border-[#f0c755]/60"}
-          />;
+          const tone = region.cited
+            ? "border-2 border-[#e0483c] bg-[#e0483c]/15 shadow-[0_0_0_9999px_rgba(20,14,11,.45)]"
+            : region.highlight
+              ? "border-2 border-[#e0a33c] bg-[#e0a33c]/15"
+              : "border border-[#f0c755]/45";
+          return <span key={region.id} title={region.text} style={style} className={`pointer-events-none absolute rounded-[3px] ${tone}`}/>;
         })}
       </div>
     </div>
@@ -89,8 +100,8 @@ function ImageSource({ view, url }: { view: SourceViewRecord; url: string | null
 }
 
 function TableSource({ view }: { view: SourceViewRecord }) {
-  const marked = useRef<HTMLTableRowElement | null>(null);
-  useEffect(() => { marked.current?.scrollIntoView({ block: "center", behavior: "smooth" }); }, [view.evidence_id]);
+  const anchor = useRef<HTMLTableRowElement | null>(null);
+  useEffect(() => { anchor.current?.scrollIntoView({ block: "center", behavior: "smooth" }); }, [view.evidence_id]);
 
   return <div className="min-h-0 flex-1 overflow-auto">
     <table className="w-full min-w-max text-left">
@@ -103,13 +114,19 @@ function TableSource({ view }: { view: SourceViewRecord }) {
       <tbody>
         {view.rows.map((row) => <tr
           key={row.number}
-          ref={row.highlight ? marked : undefined}
-          className={row.highlight ? "border-b border-[#e7c3bd] bg-[#fff1ee]" : "border-b border-[#f0e6da]"}
+          ref={row.cited ? anchor : undefined}
+          className={row.cited ? "border-b border-[#e7c3bd] bg-[#fff1ee]" : row.highlight ? "border-b border-[#ecd8b4] bg-[#fffaef]" : "border-b border-[#f0e6da]"}
         >
           <td className={`mono px-3 py-2.5 text-right text-[9px] ${row.highlight ? "font-extrabold text-[#8f302b]" : "text-[#a2958a]"}`}>{row.number}</td>
           {view.header.map((name) => {
-            const cited = row.highlight && row.highlight_columns.includes(name);
-            return <td key={name} className={`px-3 py-2.5 text-[10px] ${cited ? "rounded bg-[#e0483c]/20 font-extrabold text-[#7f1d1d] ring-1 ring-[#e0483c]" : "text-[#4b3f38]"}`}>{row.cells[name] ?? ""}</td>;
+            const cited = row.cited_columns.includes(name);
+            const seen = row.highlight_columns.includes(name);
+            const tone = cited
+              ? "rounded bg-[#e0483c]/20 font-extrabold text-[#7f1d1d] ring-1 ring-[#e0483c]"
+              : seen
+                ? "rounded bg-[#e0a33c]/18 font-bold text-[#8a5f1c] ring-1 ring-[#e0a33c]/70"
+                : "text-[#4b3f38]";
+            return <td key={name} className={`px-3 py-2.5 text-[10px] ${tone}`}>{row.cells[name] ?? ""}</td>;
           })}
         </tr>)}
       </tbody>
@@ -118,22 +135,22 @@ function TableSource({ view }: { view: SourceViewRecord }) {
   </div>;
 }
 
-function TextSource({ view }: { view: SourceViewRecord }) {
-  const marked = useRef<HTMLDivElement | null>(null);
-  useEffect(() => { marked.current?.scrollIntoView({ block: "center", behavior: "smooth" }); }, [view.evidence_id]);
+function LineSource({ lines, truncated }: { lines: SourceLine[]; truncated: boolean }) {
+  const anchor = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { anchor.current?.scrollIntoView({ block: "center", behavior: "smooth" }); }, [lines]);
 
   return <div className="min-h-0 flex-1 overflow-auto bg-[#fffdf8] px-4 py-4">
-    {view.lines.map((line) => <div
+    {lines.map((line) => <div
       key={`${line.page ?? 0}-${line.number}`}
-      ref={line.highlight ? marked : undefined}
-      className={`flex gap-3 rounded px-2 py-1 ${line.highlight ? "bg-[#e0483c]/15 ring-1 ring-[#e0483c]" : ""}`}
+      ref={line.cited ? anchor : undefined}
+      className={`flex gap-3 rounded px-2 py-1 ${line.cited ? "bg-[#e0483c]/15 ring-1 ring-[#e0483c]" : line.highlight ? "bg-[#e0a33c]/14 ring-1 ring-[#e0a33c]/60" : ""}`}
     >
       <span className={`mono w-12 shrink-0 select-none text-right text-[9px] ${line.highlight ? "font-extrabold text-[#8f302b]" : "text-[#bcae9f]"}`}>
         {line.page ? `${line.page}:${line.number}` : line.number}
       </span>
-      <span className={`mono whitespace-pre-wrap text-[10px] leading-5 ${line.highlight ? "font-bold text-[#3a2b25]" : "text-[#5b4d45]"}`}>{line.text || " "}</span>
+      <span className={`mono whitespace-pre-wrap text-[10px] leading-5 ${line.highlight ? "font-bold text-[#3a2b25]" : "text-[#5b4d45]"}`}>{line.text || " "}</span>
     </div>)}
-    {view.truncated && <p className="mt-3 text-[9px] text-[#97651e]">This file is longer than the panel shows. Download the original to read all of it.</p>}
+    {truncated && <p className="mt-3 text-[9px] text-[#97651e]">This file is longer than the panel shows. Download the original to read all of it.</p>}
   </div>;
 }
 
@@ -142,6 +159,7 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState<Mode>("parsed");
 
   const key = useMemo(
     () => (request ? `${request.evidenceId}|${JSON.stringify(request.target)}` : null),
@@ -154,6 +172,7 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
     setLoading(true);
     setError(null);
     setView(null);
+    setMode("parsed");
     getSourceView(request.caseId, request.evidenceId, request.target)
       .then((record) => { if (live) setView(record); })
       .catch(() => { if (live) setError("This source could not be opened. You may not have access to it, or it may no longer be stored."); })
@@ -161,10 +180,11 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
     return () => { live = false; };
   }, [key]);
 
-  // The original bytes are only needed to look at a picture; a table and a text file are already
-  // rendered from what the server returned.
+  // A picture and a PDF are shown from their own bytes. A table and a text file are already
+  // rendered from what the server returned, in both modes.
+  const needsBytes = view?.kind === "image" || view?.media_type === "application/pdf";
   useEffect(() => {
-    if (!request || view?.kind !== "image") return;
+    if (!request || !needsBytes) return;
     let live = true;
     let created: string | null = null;
     getOriginalObjectUrl(request.caseId, request.evidenceId).then((url) => {
@@ -172,7 +192,7 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
       if (live) setObjectUrl(url); else URL.revokeObjectURL(url);
     }).catch(() => undefined);
     return () => { live = false; if (created) URL.revokeObjectURL(created); setObjectUrl(null); };
-  }, [view?.kind, request?.evidenceId]);
+  }, [needsBytes, request?.evidenceId]);
 
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
@@ -190,6 +210,12 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
   };
 
   if (!request) return null;
+
+  // What "original" means depends on the file: a picture is always its own original, a PDF is
+  // shown by the browser, and a table has the text it arrived as.
+  const isPdf = view?.media_type === "application/pdf";
+  const hasOriginal = Boolean(view && (view.kind === "image" || isPdf || view.raw_lines.length));
+  const showOriginal = mode === "original" && hasOriginal;
 
   return <>
     <button aria-label="Close source panel" onClick={close} className="fixed inset-0 z-[85] bg-[#241a15]/45 backdrop-blur-[2px]"/>
@@ -210,10 +236,19 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
 
         {view && <div className="mt-3 flex flex-wrap items-center gap-2">
           <Chip tone={view.located ? "found" : "unfound"}>
-            {view.located ? `Found · ${view.highlight_summary}` : "Exact place not found"}
+            {view.located ? `Read here · ${view.highlight_summary}` : "Exact place not found"}
           </Chip>
+          {view.occurrence_summary && <Chip tone="context">Also here · {view.occurrence_summary}</Chip>}
           <span className="mono text-[9px] text-[#827267]">{view.original_name}</span>
           <span className="rounded-full border border-[#e4d6c6] bg-[#fff6ec] px-2 py-0.5 text-[9px] font-bold text-[#8a6a3a]">{KIND_LABEL[view.kind] ?? view.kind}</span>
+
+          {hasOriginal && view.kind !== "image" && <span className="ml-auto flex items-center gap-0.5 rounded-lg border border-[#dfd0c0] bg-white p-0.5">
+            {(["parsed", "original"] as Mode[]).map((option) => <button
+              key={option}
+              onClick={() => setMode(option)}
+              className={`rounded-md px-2.5 py-1 text-[9px] font-bold uppercase tracking-[.08em] transition ${mode === option ? "bg-[#7f1d1d] text-white" : "text-[#6b5b51] hover:bg-[#fff2ef]"}`}
+            >{option === "parsed" ? (view.kind === "table" ? "Parsed" : "Extracted") : "Original file"}</button>)}
+          </span>}
         </div>}
       </header>
 
@@ -225,13 +260,26 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
 
       {view && !loading && <>
         {view.note && <p className="border-b border-[#eadfd3] bg-[#fff8e8] px-5 py-3 text-[10px] leading-5 text-[#8a6a3a]">{view.note}</p>}
+
         {view.kind === "image" && <ImageSource view={view} url={objectUrl}/>}
-        {view.kind === "table" && <TableSource view={view}/>}
-        {view.kind === "text" && <TextSource view={view}/>}
+
+        {view.kind === "table" && (showOriginal
+          ? <LineSource lines={view.raw_lines} truncated={view.truncated}/>
+          : <TableSource view={view}/>)}
+
+        {view.kind === "text" && (showOriginal && isPdf
+          ? (objectUrl
+              ? <iframe title={`Original evidence: ${view.original_name}`} src={`${objectUrl}#page=${view.lines.find((line) => line.cited)?.page ?? 1}`} className="min-h-0 flex-1 border-0 bg-[#2a2320]"/>
+              : <p className="p-5 text-[11px] text-[#76695e]">Loading the original document…</p>)
+          : <LineSource lines={view.lines} truncated={view.truncated}/>)}
       </>}
 
-      <footer className="border-t border-[#eadfd3] bg-[#fffaf3] px-5 py-2.5 text-[9px] leading-4 text-[#847468]">
-        The marked place is where this value was read from. It is not a finding about what the evidence means.
+      <footer className="flex items-center justify-between gap-4 border-t border-[#eadfd3] bg-[#fffaf3] px-5 py-2.5 text-[9px] leading-4 text-[#847468]">
+        <span>The marked place is where this value was read from. It is not a finding about what the evidence means.</span>
+        <span className="flex shrink-0 items-center gap-3">
+          <span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-sm border-2 border-[#e0483c] bg-[#e0483c]/20"/>Read here</span>
+          <span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-sm border-2 border-[#e0a33c] bg-[#e0a33c]/20"/>Also appears</span>
+        </span>
       </footer>
     </aside>
   </>;

@@ -17,9 +17,19 @@ Three shapes, because three is how many ways a file can be looked at:
     table  -- the header and rows, addressed by row number and column name
     text   -- numbered lines, addressed by line number and page
 
-The highlight is *located*, never invented. When a reference cannot be resolved to a place in the
-file the view says so and highlights nothing, because a box drawn in the wrong place is worse than
-no box at all -- it tells a reviewer they have verified something they have not.
+Two kinds of mark, and the difference between them is the difference between two questions:
+
+    cited       the one place the stored reference points at -- "this claim was read here"
+    occurrence  every other place in the same file that carries the same value -- "and here is
+                everywhere else this value appears"
+
+A reviewer asks both. The first is provenance and the second is context: a UPI handle cited once in
+the sender column of row 2 may also sit in the receiver column of rows 3 and 4, and a panel that
+showed only the citation would have hidden two thirds of what the file says about it.
+
+The marks are *located*, never invented. When a reference cannot be resolved to a place in the file
+the view says so and marks nothing, because a box drawn in the wrong place is worse than no box at
+all -- it tells a reviewer they have verified something they have not.
 """
 
 from __future__ import annotations
@@ -59,6 +69,7 @@ class Region:
     page: int
     confidence: float | None = None
     highlight: bool = False
+    cited: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +79,7 @@ class Region:
             "page": self.page,
             "confidence": self.confidence,
             "highlight": self.highlight,
+            "cited": self.cited,
         }
 
 
@@ -77,6 +89,8 @@ class Row:
     cells: dict[str, str]
     highlight: bool = False
     highlight_columns: list[str] = field(default_factory=list)
+    cited: bool = False
+    cited_columns: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +98,8 @@ class Row:
             "cells": self.cells,
             "highlight": self.highlight,
             "highlight_columns": self.highlight_columns,
+            "cited": self.cited,
+            "cited_columns": self.cited_columns,
         }
 
 
@@ -93,9 +109,16 @@ class Line:
     text: str
     page: int | None = None
     highlight: bool = False
+    cited: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {"number": self.number, "text": self.text, "page": self.page, "highlight": self.highlight}
+        return {
+            "number": self.number,
+            "text": self.text,
+            "page": self.page,
+            "highlight": self.highlight,
+            "cited": self.cited,
+        }
 
 
 @dataclass
@@ -106,6 +129,7 @@ class SourceView:
     kind: str
     located: bool
     highlight_summary: str
+    occurrence_summary: str = ""
     note: str | None = None
     width: int | None = None
     height: int | None = None
@@ -114,6 +138,9 @@ class SourceView:
     header: list[str] = field(default_factory=list)
     rows: list[Row] = field(default_factory=list)
     lines: list[Line] = field(default_factory=list)
+    # The file's own bytes, line by line, for a table -- so a reviewer can switch from the parsed
+    # grid to the text that actually arrived. A parsed view is an interpretation, however faithful.
+    raw_lines: list[Line] = field(default_factory=list)
     truncated: bool = False
     view_version: str = VIEW_VERSION
 
@@ -125,6 +152,7 @@ class SourceView:
             "kind": self.kind,
             "located": self.located,
             "highlight_summary": self.highlight_summary,
+            "occurrence_summary": self.occurrence_summary,
             "note": self.note,
             "width": self.width,
             "height": self.height,
@@ -133,6 +161,7 @@ class SourceView:
             "header": self.header,
             "rows": [item.to_dict() for item in self.rows],
             "lines": [item.to_dict() for item in self.lines],
+            "raw_lines": [item.to_dict() for item in self.raw_lines],
             "truncated": self.truncated,
             "view_version": self.view_version,
         }
@@ -224,31 +253,40 @@ def _image_view(db: Session, evidence: EvidenceFile, target: Target) -> SourceVi
         view.note = "No text regions were recorded for this image, so a region cannot be marked on it."
         return view
 
-    # A named block is the most exact thing a reference can carry.
+    # A named block is the most exact thing a reference can carry, so it is the citation.
     if target.block_id:
         for region in regions:
             if region.id == target.block_id:
-                region.highlight = True
-        if any(region.highlight for region in regions):
-            view.located, view.highlight_summary = True, f"region {target.block_id}"
-            return view
+                region.cited = region.highlight = True
 
-    # Otherwise find the value itself. The stored bbox for an image record covers the whole canvas,
-    # which is true but useless to look at, so the regions are searched for the value instead.
+    # Then everywhere else on the page that carries the same value. The stored bbox for an image
+    # record covers the whole canvas -- true, and useless to look at -- so the value does the work.
     if target.value:
         for region in regions:
             if _contains(region.text, target.value):
                 region.highlight = True
-        marked = [region for region in regions if region.highlight]
-        if marked:
-            view.located = True
-            view.highlight_summary = f"{len(marked)} text region{'' if len(marked) == 1 else 's'} reading “{marked[0].text[:60]}”"
-            return view
 
-    view.note = (
-        "This image is the source, but the exact region could not be located on it. "
-        "The value may have been read from the image as a whole rather than from one region."
-    )
+    cited = [region for region in regions if region.cited]
+    marked = [region for region in regions if region.highlight]
+
+    if cited:
+        view.located = True
+        view.highlight_summary = f"region {cited[0].id} reading “{cited[0].text[:60]}”"
+    elif marked:
+        # Nothing named one region, so the first place the value appears is what was read.
+        marked[0].cited = True
+        view.located = True
+        view.highlight_summary = f"text region reading “{marked[0].text[:60]}”"
+    else:
+        view.note = (
+            "This image is the source, but the exact region could not be located on it. "
+            "The value may have been read from the image as a whole rather than from one region."
+        )
+        return view
+
+    others = len(marked) - 1 if marked else 0
+    if others > 0:
+        view.occurrence_summary = f"also appears in {others} other region{'' if others == 1 else 's'} on this image"
     return view
 
 
@@ -268,6 +306,29 @@ def _read_rows(path: Path, suffix: str) -> tuple[list[str], list[dict[str, str]]
     reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
     header = list(reader.fieldnames or [])
     return header, [{key: str(value) if value is not None else "" for key, value in record.items() if key} for record in reader]
+
+
+def _mark_raw_lines(view: SourceView, path: Path, target: Target) -> None:
+    """Carry the file's own text alongside the parsed grid.
+
+    A parsed table is an interpretation, however faithful, and a reviewer checking a claim against
+    a record is entitled to the bytes that arrived. Only a text-shaped table can be shown this way;
+    a spreadsheet has no lines to show.
+    """
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        return
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+
+    for index, content in enumerate(text.splitlines()[:MAX_TEXT_LINES], start=1):
+        line = Line(number=index, text=content)
+        # Row 1 of the file is the header, and the parsed rows are numbered from 2, so the two
+        # numberings already agree -- the cited row is the file line of the same number.
+        line.cited = target.row is not None and index == target.row
+        line.highlight = line.cited or bool(target.value and _contains(content, target.value))
+        view.raw_lines.append(line)
 
 
 def _table_view(evidence: EvidenceFile, path: Path, suffix: str, target: Target) -> SourceView:
@@ -292,29 +353,50 @@ def _table_view(evidence: EvidenceFile, path: Path, suffix: str, target: Target)
         truncated=truncated,
     )
 
+    # The citation: the one cell the stored reference names.
     if target.row is not None:
         for row in rows:
             if row.number == target.row:
-                row.highlight = True
+                row.cited = row.highlight = True
                 if target.column and target.column in row.cells:
-                    row.highlight_columns = [target.column]
-        if any(row.highlight for row in rows):
-            view.located = True
-            view.highlight_summary = f"row {target.row}" + (f", column “{target.column}”" if target.column else "")
-            return view
+                    # Only the cited list. The cited cell is where the claim was read, which is
+                    # frequently not a cell holding the value being traced: a relationship's
+                    # reference points at its subject, and a reader opening an entity through that
+                    # relationship is usually looking for the object.
+                    row.cited_columns = [target.column]
 
+    # Then every other cell in the file carrying the same value. A handle cited once as a sender
+    # may sit three more times as a receiver, and a panel that showed only the citation would have
+    # hidden most of what this file says about it.
     if target.value:
         for row in rows:
             hits = [name for name, cell in row.cells.items() if _contains(cell, target.value)]
             if hits:
-                row.highlight, row.highlight_columns = True, hits
-        marked = [row for row in rows if row.highlight]
-        if marked:
-            view.located = True
-            view.highlight_summary = f"{len(marked)} row{'' if len(marked) == 1 else 's'} containing this value"
-            return view
+                row.highlight = True
+                row.highlight_columns = sorted(set(row.highlight_columns) | set(hits))
 
-    view.note = "This table is the source, but the cited row could not be located in it."
+    cited = [row for row in rows if row.cited]
+    marked = [row for row in rows if row.highlight]
+
+    if cited:
+        view.located = True
+        view.highlight_summary = f"row {cited[0].number}" + (f", column “{target.column}”" if target.column else "")
+    elif marked:
+        marked[0].cited, marked[0].cited_columns = True, list(marked[0].highlight_columns)
+        view.located = True
+        view.highlight_summary = f"row {marked[0].number}" + (
+            f", column “{marked[0].cited_columns[0]}”" if marked[0].cited_columns else ""
+        )
+    else:
+        view.note = "This table is the source, but the cited row could not be located in it."
+        return view
+
+    citations = {(row.number, column) for row in rows if row.cited for column in row.cited_columns}
+    others = sum(1 for row in marked for column in row.highlight_columns if (row.number, column) not in citations)
+    if others > 0:
+        view.occurrence_summary = f"this value appears in {others} cell{'' if others == 1 else 's'} of this file"
+
+    _mark_raw_lines(view, path, target)
     return view
 
 
@@ -373,24 +455,32 @@ def _text_view(db: Session, evidence: EvidenceFile, storage_key: str, suffix: st
             if target.page and line.page and line.page != target.page:
                 continue
             if target.line_start <= line.number <= end:
-                line.highlight = True
-        if any(line.highlight for line in lines):
-            view.located = True
-            span = f"line {target.line_start}" if target.line_start == end else f"lines {target.line_start}–{end}"
-            view.highlight_summary = (f"page {target.page}, " if target.page else "") + span
-            return view
+                line.cited = line.highlight = True
 
     if target.value:
         for line in lines:
             if _contains(line.text, target.value):
                 line.highlight = True
-        marked = [line for line in lines if line.highlight]
-        if marked:
-            view.located = True
-            view.highlight_summary = f"{len(marked)} line{'' if len(marked) == 1 else 's'} containing this value"
-            return view
 
-    view.note = "This file is the source, but the cited line could not be located in it."
+    cited = [line for line in lines if line.cited]
+    marked = [line for line in lines if line.highlight]
+
+    if cited:
+        view.located = True
+        first, last = cited[0].number, cited[-1].number
+        span = f"line {first}" if first == last else f"lines {first}–{last}"
+        view.highlight_summary = (f"page {cited[0].page}, " if cited[0].page else "") + span
+    elif marked:
+        marked[0].cited = True
+        view.located = True
+        view.highlight_summary = (f"page {marked[0].page}, " if marked[0].page else "") + f"line {marked[0].number}"
+    else:
+        view.note = "This file is the source, but the cited line could not be located in it."
+        return view
+
+    others = len(marked) - len(cited or [marked[0]])
+    if others > 0:
+        view.occurrence_summary = f"also appears on {others} other line{'' if others == 1 else 's'} of this file"
     return view
 
 

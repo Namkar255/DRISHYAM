@@ -69,6 +69,7 @@ def test_an_image_marks_the_region_that_reads_the_value(sourced_case) -> None:
 
     marked = [region for region in view.regions if region.highlight]
     assert marked, view.note
+    assert sum(1 for region in view.regions if region.cited) == 1, "exactly one region is the citation"
     assert all("9876543210" in region.text.replace(" ", "") for region in marked)
     for region in marked:
         x0, y0, x1, y1 = region.bbox
@@ -82,9 +83,9 @@ def test_a_table_marks_the_cited_cell(sourced_case) -> None:
 
     assert view.kind == "table"
     assert view.located and view.highlight_summary.startswith("row 2")
-    marked = [row for row in view.rows if row.highlight]
-    assert len(marked) == 1 and marked[0].number == 2
-    assert marked[0].highlight_columns == ["a_party"]
+    cited = [row for row in view.rows if row.cited]
+    assert len(cited) == 1 and cited[0].number == 2
+    assert cited[0].cited_columns == ["a_party"]
     assert "a_party" in view.header
 
 
@@ -94,8 +95,7 @@ def test_a_text_file_marks_the_cited_line(sourced_case) -> None:
 
     assert view.kind == "text"
     assert view.located
-    marked = [line for line in view.lines if line.highlight]
-    assert [line.number for line in marked] == [7]
+    assert [line.number for line in view.lines if line.cited] == [7]
 
 
 def test_a_pdf_marks_the_cited_page_and_line(sourced_case) -> None:
@@ -106,8 +106,8 @@ def test_a_pdf_marks_the_cited_page_and_line(sourced_case) -> None:
 
     assert view.kind == "text"
     assert view.located
-    marked = [line for line in view.lines if line.highlight]
-    assert marked and all(line.page == 1 for line in marked)
+    cited = [line for line in view.lines if line.cited]
+    assert cited and all(line.page == 1 for line in cited)
 
 
 # --------------------------------------------------------------------------- finding by value
@@ -121,6 +121,51 @@ def test_a_value_alone_finds_its_place_when_no_reference_locates_it(sourced_case
     assert any(row.highlight for row in view.rows), "punctuation should not decide whether a value is found"
 
 
+# --------------------------------------------------------------------------- everywhere else
+
+
+def test_a_value_is_marked_everywhere_it_appears_not_only_where_it_was_cited(sourced_case) -> None:
+    """A handle cited once as a sender may sit three more times as a receiver.
+
+    Showing only the citation answers "where was this read" and hides most of what the file says
+    about the value. Both marks are needed, and they must stay distinguishable: one is provenance,
+    the other is context.
+    """
+    case, _ = sourced_case
+    view = _view(_evidence(case["id"], "transactions"), row=2, column="sender", value="skyline.manpower@upi")
+
+    cited = [row for row in view.rows if row.cited]
+    marked = [row for row in view.rows if row.highlight]
+    assert len(cited) == 1 and cited[0].number == 2
+    assert len(marked) > len(cited), "the value appears elsewhere in this file and was not marked there"
+    assert view.occurrence_summary, "the panel must say that the value appears elsewhere"
+
+    for row in marked:
+        for column in row.highlight_columns:
+            assert "skyline" in row.cells[column].casefold(), "a cell was marked that does not carry the value"
+
+
+def test_the_citation_is_marked_even_when_it_holds_a_different_value(sourced_case) -> None:
+    """The cited cell is the cited cell. It stays marked whether or not it carries the traced value.
+
+    An entity is opened through a relationship, and a relationship's reference points at its
+    subject -- which is often not the entity the reader clicked.
+    """
+    case, _ = sourced_case
+    view = _view(_evidence(case["id"], "transactions"), row=2, column="sender", value="skyline.manpower@upi")
+    cited = next(row for row in view.rows if row.cited)
+    assert cited.cited_columns == ["sender"]
+
+
+def test_a_table_carries_its_own_text_as_well_as_its_grid(sourced_case) -> None:
+    """A parsed grid is an interpretation. A reviewer checking a record is owed the bytes."""
+    case, _ = sourced_case
+    view = _view(_evidence(case["id"], "cdr_synthetic"), row=2, column="a_party")
+    assert view.raw_lines, "a text-shaped table must also be readable as text"
+    assert [line.number for line in view.raw_lines if line.cited] == [2]
+    assert "a_party" in view.raw_lines[0].text, "line 1 of the file is its header"
+
+
 # --------------------------------------------------------------------------- refusing to guess
 
 
@@ -130,14 +175,14 @@ def test_a_place_that_cannot_be_found_is_reported_not_approximated(sourced_case)
 
     assert view.located is False
     assert view.note, "an unlocatable reference must say so"
-    assert not any(row.highlight for row in view.rows), "nothing may be marked when nothing was found"
+    assert not any(row.highlight or row.cited for row in view.rows), "nothing may be marked when nothing was found"
 
 
 def test_a_row_outside_the_table_marks_nothing(sourced_case) -> None:
     case, _ = sourced_case
     view = _view(_evidence(case["id"], "cdr_synthetic"), row=9999, column="a_party")
     assert view.located is False
-    assert not any(row.highlight for row in view.rows)
+    assert not any(row.highlight or row.cited for row in view.rows)
 
 
 # --------------------------------------------------------------------------- through the API
@@ -154,7 +199,7 @@ def test_the_endpoint_returns_the_marked_view(client, sourced_case) -> None:
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["kind"] == "table" and body["located"] is True
-    assert [row["number"] for row in body["rows"] if row["highlight"]] == [2]
+    assert [row["number"] for row in body["rows"] if row["cited"]] == [2]
 
 
 def test_another_users_evidence_is_not_readable(client, sourced_case, account) -> None:

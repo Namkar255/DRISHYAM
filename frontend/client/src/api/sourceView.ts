@@ -14,6 +14,7 @@ export type SourceRegion = {
   page: number;
   confidence: number | null;
   highlight: boolean;
+  cited: boolean;
 };
 
 export type SourceRow = {
@@ -21,9 +22,11 @@ export type SourceRow = {
   cells: Record<string, string>;
   highlight: boolean;
   highlight_columns: string[];
+  cited: boolean;
+  cited_columns: string[];
 };
 
-export type SourceLine = { number: number; text: string; page: number | null; highlight: boolean };
+export type SourceLine = { number: number; text: string; page: number | null; highlight: boolean; cited: boolean };
 
 export type SourceViewRecord = {
   evidence_id: string;
@@ -32,6 +35,8 @@ export type SourceViewRecord = {
   kind: "image" | "table" | "text";
   located: boolean;
   highlight_summary: string;
+  /** Everywhere else in the same file this value appears. Context, not provenance. */
+  occurrence_summary: string;
   note: string | null;
   width: number | null;
   height: number | null;
@@ -40,6 +45,8 @@ export type SourceViewRecord = {
   header: string[];
   rows: SourceRow[];
   lines: SourceLine[];
+  /** A table's own bytes, line by line, for readers who want the file rather than the grid. */
+  raw_lines: SourceLine[];
   truncated: boolean;
   view_version: string;
 };
