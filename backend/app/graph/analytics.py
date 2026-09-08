@@ -131,6 +131,7 @@ def _explain(
     node: str,
     *,
     metric: str,
+    score: float,
     communities: dict[str, int],
     is_bridge: bool,
 ) -> str:
@@ -161,7 +162,10 @@ def _explain(
         structural.append(f"it links {len(touched)} otherwise separate groups")
     if is_bridge:
         structural.append("removing it would split the network here")
-    if metric == "betweenness_centrality" and len(touched) <= 1 and not is_bridge:
+    # Only claim a routing role when betweenness actually found one. A score of zero means the
+    # node lies on no shortest path at all, so saying it sits on one was simply false -- and every
+    # leaf in a fragmented case says zero.
+    if metric == "betweenness_centrality" and score > 0 and len(touched) <= 1 and not is_bridge:
         structural.append("it sits on the shortest route between other entities in its group")
 
     if not structural:
@@ -241,7 +245,7 @@ def important_entities(
                 "supporting_evidence_count": len(evidence),
                 "communities_linked": len({communities[other] for other in neighbours if other in communities}),
                 "is_bridge": node in cut_nodes,
-                "why": _explain(graph, node, metric=metric, communities=communities, is_bridge=node in cut_nodes),
+                "why": _explain(graph, node, metric=metric, score=float(score), communities=communities, is_bridge=node in cut_nodes),
                 "caveat": IMPORTANCE_CAVEAT,
             }
         )
