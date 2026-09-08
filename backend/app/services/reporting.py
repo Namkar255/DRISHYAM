@@ -590,7 +590,7 @@ def _render_relationship_graph(db: Session, case_id: str, output: Path) -> tuple
         graph.add_node(node["id"], label=node.get("label", "record"), kind=node.get("kind", "entity"))
     for edge in projection["edges"]:
         graph.add_edge(edge["source"], edge["target"], relationship=edge.get("relationship", "source-linked"))
-    palette = {"evidence": "#d9c7a6", "event": "#59636a", "transaction": "#b17a2d", "phone": "#7b1e2b", "upi_id": "#7b1e2b", "email": "#657b87", "url": "#657b87"}
+    palette = {"evidence": "#d9c7a6", "event": "#59636a", "transaction": "#b17a2d", "phone": "#7b1e2b", "upi": "#7b1e2b", "upi_id": "#7b1e2b", "account": "#b17a2d", "reference": "#8a7a5c", "vehicle": "#4a6350", "person": "#6b4f7a", "email": "#657b87", "url": "#657b87"}
     degrees = dict(graph.degree())
     ranked = sorted(graph.nodes, key=lambda node: (-degrees[node], str(graph.nodes[node].get("label"))))
     evidence_nodes = {node for node in graph.nodes if graph.nodes[node].get("kind") == "evidence"}

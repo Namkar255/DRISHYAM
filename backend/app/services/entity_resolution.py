@@ -89,6 +89,11 @@ def canonicalize(field_name: str, raw: str) -> ResolvedIdentity | None:
 
     if kind in {"email", "account"}:
         resolved = _classify_account(value)
+        # An account number is written with spaces or dashes as often as without, and a bank code
+        # is quoted in either case. Neither separator nor case identifies a different account, so
+        # both are dropped. A UPI handle and an email keep their shape; only case is folded.
+        if resolved in {"account", "ifsc"}:
+            return ResolvedIdentity(resolved, value, _NON_ALNUM.sub("", value.casefold()))
         return ResolvedIdentity(resolved, value, value.casefold())
 
     if kind == "reference":
@@ -246,3 +251,50 @@ def resolve_case(db: Session, case_id: str) -> dict[str, int]:
     seen: set[tuple[str, str, str]] = set()
     stored = sum(resolve_record(db, record, seen) for record in records)
     return {"records": len(records), "occurrences_added": stored}
+
+
+# The deterministic regex extractor speaks an older vocabulary than the grounded pipeline: it
+# writes "upi_id" where the resolver writes "upi", "utr" where the resolver writes "reference",
+# and it canonicalizes a phone as "+919876543210" where the resolver keys on the last ten digits.
+# Both write into the same `entities` table, so one phone number became two nodes -- one carrying
+# the relationships, the other carrying none -- and a value seen in a chat export never joined the
+# same value seen in a bank statement. Mapping the old names onto identity fields sends both
+# generations through the single function above, so they mint one node.
+INDICATOR_FIELDS: dict[str, str] = {
+    # The regex extractor's vocabulary.
+    "phone": "phone_numbers",
+    "email": "email_addresses",
+    "upi_id": "account_identifiers",
+    "ifsc": "account_identifiers",
+    "account_number": "account_identifiers",
+    "utr": "transaction_reference",
+    # The resolver's own node types, so a row already minted by this module re-resolves to
+    # itself rather than falling through to a weaker normalization.
+    "upi": "account_identifiers",
+    "account": "account_identifiers",
+    "reference": "transaction_reference",
+    "device": "device_identifier",
+    "party": "sender",
+    "person": "person_names",
+    "organisation": "organisation_names",
+    "location": "location_names",
+    "vehicle": "vehicle_identifiers",
+}
+
+
+def canonicalize_indicator(entity_type: str, value: str) -> ResolvedIdentity | None:
+    """Resolve a deterministic-extractor indicator to the same node the grounded pipeline mints.
+
+    Types the resolver has no identity field for (a URL, an IP address) keep their own name and
+    their own conservative normalization; they are still identifiers, just not ones the two
+    pipelines ever disagreed about.
+
+    Passing a value this module minted returns that same node, so the function is safe to run over
+    rows already on record.
+    """
+    field_name = INDICATOR_FIELDS.get(entity_type)
+    if field_name is not None:
+        return canonicalize(field_name, value)
+
+    folded = patterns.normalize_identifier(entity_type, str(value))
+    return ResolvedIdentity(entity_type, str(value).strip(), folded) if folded.strip() else None

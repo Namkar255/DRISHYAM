@@ -14,6 +14,7 @@ from app.core.security import utcnow
 from app.extraction import extract_indicators, extract_timestamp, extract_transaction_fields
 from app.models.entities import Entity, Event, EventEntity, EvidenceFile, EvidenceStatus, ExtractedText, ProcessingRun, ProcessingState, Transaction
 from app.parsers import ParsedRecord, parse_evidence
+from app.services import entity_resolution
 from app.services.audit import audit
 from app.services.storage import get_private_path
 
@@ -37,12 +38,21 @@ def _finish(run: ProcessingRun) -> None:
     run.state, run.progress, run.completed_at = ProcessingState.SUCCEEDED, 100, utcnow()
 
 
-def _entity_for(db: Session, *, case_id: str, evidence_id: str, indicator: tuple[str, str, str, float], reference: str) -> Entity:
-    entity_type, value, normalized_value, confidence = indicator
-    existing = db.scalar(select(Entity).where(Entity.case_id == case_id, Entity.entity_type == entity_type, Entity.normalized_value == normalized_value))
+def _entity_for(db: Session, *, case_id: str, evidence_id: str, indicator: tuple[str, str, str, float], reference: str) -> Entity | None:
+    """Mint or reuse the one node this indicator belongs to.
+
+    The regex extractor's own normalization is deliberately ignored here. It disagreed with the
+    grounded pipeline's resolver on both the type name and the canonical key, so the same phone
+    number arrived as two rows -- one holding every relationship, the other holding none.
+    """
+    entity_type, value, _own_normalization, confidence = indicator
+    identity = entity_resolution.canonicalize_indicator(entity_type, value)
+    if identity is None:
+        return None
+    existing = db.scalar(select(Entity).where(Entity.case_id == case_id, Entity.entity_type == identity.entity_type, Entity.normalized_value == identity.canonical_value))
     if existing:
         return existing
-    entity = Entity(case_id=case_id, source_evidence_id=evidence_id, entity_type=entity_type, value=value, normalized_value=normalized_value, source_reference=reference[:512], extraction_method="regex_normalizer", confidence=confidence)
+    entity = Entity(case_id=case_id, source_evidence_id=evidence_id, entity_type=identity.entity_type, value=identity.display_value[:512], normalized_value=identity.canonical_value[:512], source_reference=reference[:512], extraction_method="regex_normalizer", confidence=confidence)
     db.add(entity)
     db.flush()
     return entity
@@ -86,8 +96,12 @@ def _ocr_document_event(db: Session, evidence: EvidenceFile, records: list[Parse
     )
     db.add(event)
     db.flush()
+    linked: set[str] = set()
     for indicator in extract_indicators(text):
         entity = _entity_for(db, case_id=evidence.case_id, evidence_id=evidence.id, indicator=indicator, reference=event.raw_text_reference)
+        if entity is None or entity.id in linked:
+            continue
+        linked.add(entity.id)
         db.add(EventEntity(event_id=event.id, entity_id=entity.id, relationship_type="mentioned_in", confidence=indicator[3]))
     return event
 
@@ -113,8 +127,12 @@ def _events(db: Session, evidence: EvidenceFile, records: list[ParsedRecord]) ->
         db.add(event)
         db.flush()
         events.append(event)
+        linked: set[str] = set()
         for indicator in extract_indicators(record.raw_text):
             entity = _entity_for(db, case_id=evidence.case_id, evidence_id=evidence.id, indicator=indicator, reference=event.raw_text_reference)
+            if entity is None or entity.id in linked:
+                continue
+            linked.add(entity.id)
             db.add(EventEntity(event_id=event.id, entity_id=entity.id, relationship_type="mentioned_in", confidence=indicator[3]))
         if transaction["amount"] is not None:
             db.add(Transaction(case_id=evidence.case_id, event_id=event.id, source_evidence_id=evidence.id, amount=float(transaction["amount"]), occurred_at=event.occurred_at, reference_id=str(transaction["reference"]) if transaction["reference"] else None, sender_value=str(transaction["sender"]).strip().lower() if transaction["sender"] else None, receiver_value=str(transaction["receiver"]).strip().lower() if transaction["receiver"] else None, source_kind=evidence.source_category, confidence=event.confidence))

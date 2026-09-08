@@ -29,7 +29,7 @@ def evaluate_alerts(db: Session, case_id: str) -> int:
             _alert(db, case_id=case_id, rule_code="REPEATED_RECIPIENT", key=receiver, severity=Severity.CRITICAL, explanation=f"Review lead: {count} documented transfers reference the same recipient identifier ({receiver}).", evidence_ids=[item.source_evidence_id for item in matching], event_id=matching[0].event_id)
     indicators = Counter((item.entity_type, item.normalized_value) for item in entities)
     for (entity_type, value), count in indicators.items():
-        if entity_type in {"upi_id", "phone", "email"} and count >= 3:
+        if entity_type in {"upi", "upi_id", "phone", "email", "account"} and count >= 3:
             refs = [item for item in entities if (item.entity_type, item.normalized_value) == (entity_type, value)]
             _alert(db, case_id=case_id, rule_code="RECURRING_IDENTIFIER", key=f"{entity_type}:{value}", severity=Severity.HIGH, explanation=f"Review lead: the {entity_type} identifier '{value}' appears in {count} evidence-derived records.", evidence_ids=list({item.source_evidence_id for item in refs}))
     phishing = [event for event in events if event.event_type == "phishing_email"]
