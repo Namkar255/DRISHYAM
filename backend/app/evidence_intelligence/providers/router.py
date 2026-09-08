@@ -162,7 +162,7 @@ def _apply_field(record: NormalizedRecordDraft, name: str, provenance: FieldProv
         if isinstance(value, list):
             setattr(record, name, [str(item) for item in value])
         return
-    if name in {"media_content", "narration", "duration", "cell_site", "fir_number", "fir_sections", "police_station", "stated_vehicle_use", "stated_presence"}:
+    if name in {"media_content", "narration", "duration", "cell_site", "fir_number", "fir_sections", "police_station", "stated_vehicle_use", "stated_presence", "stated_vehicle_presence"}:
         if value is not None:
             record.event_attributes[name] = value
         return

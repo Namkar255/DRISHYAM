@@ -340,6 +340,7 @@ def _stated_role_edges(db: Session, record: NormalizedRecord) -> list[EntityRela
     for attribute, relation_type, subject_field, object_field in (
         ("stated_vehicle_use", USED_VEHICLE, "person_names", "vehicle_identifiers"),
         ("stated_presence", LOCATED_AT, "person_names", "location_names"),
+        ("stated_vehicle_presence", LOCATED_AT, "vehicle_identifiers", "location_names"),
     ):
         pairs = attributes.get(attribute) or []
         if not isinstance(pairs, list):

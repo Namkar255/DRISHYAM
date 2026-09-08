@@ -714,6 +714,16 @@ def _report_enrichment(extraction: RawExtraction, *, evidence_id: str) -> None:
             unit.facts["stated_presence"].reason = (
                 "The sentence places the person somewhere. It does not establish that they were there at any stated time."
             )
+        if vehicle_presence := patterns.find_vehicle_location_links(unit.text):
+            unit.facts["stated_vehicle_presence"] = _direct(
+                [[plate, place] for plate, place, _ in vehicle_presence],
+                quote=vehicle_presence[0][2],
+                reference=unit.reference,
+                confidence=0.80,
+            )
+            unit.facts["stated_vehicle_presence"].reason = (
+                "The sentence places the vehicle somewhere. It says nothing about who was in it."
+            )
 
 
 def _paragraph_units(text: str, *, evidence_id: str, page: int | None) -> list[ExtractionUnit]:
@@ -784,12 +794,31 @@ def _cell_fact(canonical: str, raw_value: str, reference: SourceReference) -> di
 
 
 def _map_columns(header: list[str], aliases: dict[str, tuple[str, ...]]) -> dict[str, str]:
-    lowered = {column.strip().lower(): column for column in header if column}
+    """Match a table's headers to the fields they carry, ignoring how they are punctuated.
+
+    An exported CSV writes "a_party" where the alias list says "a-party", and "account_number"
+    where it says "account number". Matching the exact string meant a real CDR's A-party column
+    went unmapped, so who dialled whom was lost and a call record could only ever produce the
+    symmetric "these two were in contact" -- the directed CALLED relationship the column exists to
+    support was never built. Separators carry no meaning in a header, so they are dropped on both
+    sides. The alias lists keep their readable spellings; several now fold onto one key, which is
+    what they always meant.
+    """
+
+    def fold(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", value.strip().lower())
+
+    folded = {}
+    for column in header:
+        if column and fold(column):
+            folded.setdefault(fold(column), column)
+
     mapping: dict[str, str] = {}
     for canonical, options in aliases.items():
         for option in options:
-            if option in lowered:
-                mapping[canonical] = lowered[option]
+            match = folded.get(fold(option))
+            if match is not None:
+                mapping[canonical] = match
                 break
     return mapping
 

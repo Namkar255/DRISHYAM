@@ -468,12 +468,23 @@ def normalize_location(value: str) -> str:
 _LOCATION_MARKERS = frozenset("police station thana district distt village taluka tehsil".split())
 
 
+# A word, then a colon: the source is labelling the next field, not naming this one.
+_LABEL_AHEAD = re.compile(r"[A-Za-z.]+\s*:")
+
+
 def find_locations(text: str) -> list[str]:
     """Places the source explicitly marks as places."""
     found: set[str] = set()
     for rule, strip_markers in LOCATION_RULES:
         for match in rule.finditer(text):
             words = match.group("name").split()
+            # A form puts its fields side by side: "District: Mumbai Suburban  Date: 12/07/2026".
+            # The phrase runs on into the next field's label, and "Date" is capitalised like any
+            # place name, so the district was recorded as "Mumbai Suburban Date". A word the source
+            # immediately follows with a colon is a label for what comes after it, not part of what
+            # came before.
+            while len(words) > 1 and _LABEL_AHEAD.match(text, match.end("name") - len(words[-1])):
+                words.pop()
             if strip_markers:
                 while words and words[0].casefold().rstrip(".") in _LOCATION_MARKERS:
                     words.pop(0)
@@ -511,6 +522,23 @@ PERSON_INLINE_ROLE_PATTERN = re.compile(
 )
 
 
+# A surveillance note or a statement rarely writes a label. It writes the way an officer speaks:
+# "a person identifying himself as Suresh Yadava", "one Mohan Lal was seen", "who gave his name as
+# Ravi Kumar". The role is stated as plainly as any header does it, and reading only the labelled
+# and inline-role forms left every name in a surveillance note invisible -- which is the one source
+# type SIH26189 names that has no header at all.
+#
+# The introducing phrase is what supplies the role here, so the name still never comes from
+# capitalisation alone. The bare legal idiom "one Suresh Yadava" is deliberately not among them:
+# it reduces to "one" plus a capitalised word, and read "This is one Rule" as a person.
+PERSON_INTRODUCTION_PATTERN = re.compile(
+    r"\b(?:identif(?:ying|ied)\s+(?:himself|herself|themselves)\s+as"
+    r"|(?:who\s+)?gave\s+(?:his|her|their)\s+name\s+as"
+    r"|(?:by\s+)?the\s+name\s+of)\s+"
+    r"(?P<name>[A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,3})"
+)
+
+
 def normalize_person(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
@@ -518,7 +546,7 @@ def normalize_person(value: str) -> str:
 def find_person_names(text: str) -> list[str]:
     """Names the source attaches to a stated role. Never inferred from capitalisation."""
     found: set[str] = set()
-    for pattern in (PERSON_LABEL_PATTERN, PERSON_RELATION_PATTERN, PERSON_INLINE_ROLE_PATTERN):
+    for pattern in (PERSON_LABEL_PATTERN, PERSON_RELATION_PATTERN, PERSON_INLINE_ROLE_PATTERN, PERSON_INTRODUCTION_PATTERN):
         for match in pattern.finditer(text):
             name = " ".join(match.group("name").split()).strip(" .")
             # A label followed by an email or phone is an identifier, not a name.
@@ -591,8 +619,15 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
 # was driving / drove / riding / travelling in / on board
 _DRIVING_VERB = r"(?:driv\w*|rid\w*|travell?\w*\s+in|aboard|on\s+board|using|used)"
-# seen at / present at / residing at / located at / arrested at
-_PRESENCE_VERB = r"(?:seen|spotted|present|residing|resident|living|located|found|arrested|apprehended|met)"
+# seen at / present at / residing at / located at / arrested at / observed parked at
+# A surveillance log is written in a vocabulary of its own -- "observed", "parked", "stationed",
+# "waiting" -- and none of it was here, so the source type SIH26189 names for exactly this fact
+# produced no presence at all. These are stative: they say something was somewhere. Verbs of
+# motion are deliberately absent, because "proceeded towards Andheri East" places nobody there.
+_PRESENCE_VERB = (
+    r"(?:seen|spotted|sighted|noticed|observed|present|residing|resident|living|located|found"
+    r"|arrested|apprehended|met|parked|stationed|waiting|standing|halted|stopped)"
+)
 
 
 def sentences(text: str) -> list[str]:
@@ -610,6 +645,27 @@ def find_person_vehicle_links(text: str) -> list[tuple[str, str, str]]:
             for vehicle in vehicles:
                 if (person, vehicle) not in {(item[0], item[1]) for item in links}:
                     links.append((person, vehicle, sentence))
+    return links
+
+
+def find_vehicle_location_links(text: str) -> list[tuple[str, str, str]]:
+    """(plate, place, quoted sentence) where one sentence places a vehicle somewhere.
+
+    A surveillance note is mostly this sentence: "Vehicle MH12DE1433 observed parked at Linking
+    Road." The presence rule read only people, so the one fact a surveillance log exists to record
+    produced no edge at all -- and the recurring-vehicle-at-a-location alert had nothing to fire on.
+
+    A plate has a shape a person's name does not, so unlike a person it needs no stated role.
+    """
+    links: list[tuple[str, str, str]] = []
+    for sentence in sentences(text):
+        places = find_locations(sentence)
+        if not places or not re.search(_PRESENCE_VERB, sentence, re.IGNORECASE):
+            continue
+        for plate in find_vehicle_identifiers(sentence):
+            for place in places:
+                if (plate, place) not in {(item[0], item[1]) for item in links}:
+                    links.append((plate, place, sentence))
     return links
 
 
