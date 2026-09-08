@@ -6,10 +6,11 @@ which is the relationship map SIH26189 asks for.
 Three rules govern everything here.
 
 **A relation is only as strong as what the source states.** A bank row that names a payer column
-and a payee column states a transfer. A call log that lists both numbers in one column states
-contact, not who dialled -- so it produces a symmetric edge, never a directed one. Two names in the
-same FIR paragraph state only that the source mentioned them together, and that edge says exactly
-that and nothing more.
+and a payee column states a transfer. A CDR that names an A-party and a B-party states who dialled;
+a call log that lists both numbers in one column does not, and produces a symmetric edge instead.
+An FIR sentence carrying a verb -- "was driving MH12DE1433" -- states that the person used the
+vehicle; the same two names sitting in different sentences on one page state only that the source
+mentioned them together, and that edge says exactly that and nothing more.
 
 **Every edge carries its source.** `source_evidence_id` and `source_reference` are mandatory at the
 column level. An edge whose evidence a reviewer cannot open is not intelligence.
@@ -37,17 +38,19 @@ BUILDER_VERSION = "relationship-builder-v1"
 
 # --- relation vocabulary ----------------------------------------------------
 # Only relations the current adapters can actually establish are listed. USED_VEHICLE and
-# LOCATED_AT are deliberately absent: nothing in the pipeline yet parses "the vehicle driven by X"
-# or "X was present at Y", and emitting them from mere co-occurrence would assert a fact the
-# evidence does not carry. They arrive with the FIR and surveillance adapters.
+# LOCATED_AT arrived with the report adapters, and they are read one sentence at a time from a
+# stated verb -- never from two names appearing on the same page.
 TRANSFERRED_TO = "TRANSFERRED_TO"
 REQUESTED_PAYMENT_FROM = "REQUESTED_PAYMENT_FROM"
+CALLED = "CALLED"
+USED_VEHICLE = "USED_VEHICLE"
+LOCATED_AT = "LOCATED_AT"
 MESSAGED = "MESSAGED"
 COMMUNICATED_WITH = "COMMUNICATED_WITH"
 ASSOCIATED_WITH = "ASSOCIATED_WITH"
 MENTIONED_WITH = "MENTIONED_WITH"
 
-RELATION_TYPES = (TRANSFERRED_TO, REQUESTED_PAYMENT_FROM, MESSAGED, COMMUNICATED_WITH, ASSOCIATED_WITH, MENTIONED_WITH)
+RELATION_TYPES = (TRANSFERRED_TO, REQUESTED_PAYMENT_FROM, CALLED, USED_VEHICLE, LOCATED_AT, MESSAGED, COMMUNICATED_WITH, ASSOCIATED_WITH, MENTIONED_WITH)
 
 # What each relation means in a sentence, for the reviewer and the report.
 #
@@ -59,6 +62,9 @@ RELATION_TYPES = (TRANSFERRED_TO, REQUESTED_PAYMENT_FROM, MESSAGED, COMMUNICATED
 RELATION_MEANING = {
     TRANSFERRED_TO: "The source states that the first party sent money to the second.",
     REQUESTED_PAYMENT_FROM: "The source states that the first party asked the second for money. It does not record that any money moved.",
+    CALLED: "The call record names the first number as the calling party and the second as the called party.",
+    USED_VEHICLE: "One sentence in the source states that the person was driving, riding or using the vehicle.",
+    LOCATED_AT: "One sentence in the source places the person at this location. It does not establish when.",
     MESSAGED: "The source states that the first party sent a message to the second.",
     COMMUNICATED_WITH: "The source records contact between the two parties but does not state who initiated it.",
     ASSOCIATED_WITH: "The source names these two as the parties to the same record, without stating what passed between them.",
@@ -70,6 +76,9 @@ RELATION_MEANING = {
 RELATION_CONFIDENCE = {
     TRANSFERRED_TO: 0.90,
     REQUESTED_PAYMENT_FROM: 0.85,
+    CALLED: 0.92,
+    USED_VEHICLE: 0.82,
+    LOCATED_AT: 0.72,
     MESSAGED: 0.88,
     COMMUNICATED_WITH: 0.75,
     ASSOCIATED_WITH: 0.60,
@@ -87,6 +96,10 @@ MOVED_AMOUNT_ROLES = {"payment", "fee"}
 REQUESTED_AMOUNT_ROLES = {"request"}
 
 COMMUNICATION_SOURCES = {"email", "chat_export", "screenshot"}
+
+# Sources whose rows are call records. A stated A-party and B-party is what makes CALLED
+# directed; without those columns the pair is only known to have been in contact.
+CALL_SOURCES = {"call_log", "cdr"}
 
 # A ledger row states a completed transaction by its structure: a declared amount column between a
 # payer column and a payee column is what a statement *is*. Its narration is a label, not the
@@ -231,7 +244,12 @@ def _stated_party_edges(db: Session, record: NormalizedRecord) -> list[EntityRel
     source_type = (record.source_type or "").lower()
     is_ledger_row = source_type in STRUCTURED_TRANSFER_SOURCES
 
-    if has_amount and amount_role == BALANCE_ROLE:
+    if source_type in CALL_SOURCES:
+        # The record names an A-party column and a B-party column, so the direction is stated
+        # rather than inferred. A log that prints one bare number column never reaches here and
+        # produces the symmetric COMMUNICATED_WITH edge instead.
+        relation_type = CALLED
+    elif has_amount and amount_role == BALANCE_ROLE:
         # A position, not a movement. The parties are named; nothing passed between them here.
         relation_type = ASSOCIATED_WITH
     elif has_amount and (amount_role in MOVED_AMOUNT_ROLES or is_ledger_row):
@@ -279,7 +297,12 @@ def _call_log_edges(db: Session, record: NormalizedRecord) -> list[EntityRelatio
     therefore symmetric. A dedicated CDR adapter that reads A-party and B-party separately can
     upgrade these to a directed CALLED.
     """
-    if (record.source_type or "").lower() != "call_log":
+    if (record.source_type or "").lower() not in CALL_SOURCES:
+        return []
+    if _values(record, "sender") and _values(record, "receiver"):
+        # The row named its A-party and B-party, so a directed CALLED has already been recorded.
+        # Adding the symmetric edge as well would put two edges on one fact and make the pair look
+        # twice as supported as it is.
         return []
     numbers = _values(record, "phone_numbers")
     if len(numbers) != 2:
@@ -302,6 +325,46 @@ def _call_log_edges(db: Session, record: NormalizedRecord) -> list[EntityRelatio
         reference=_field_reference(record, "phone_numbers"),
     )
     return [relation] if relation is not None else []
+
+
+def _stated_role_edges(db: Session, record: NormalizedRecord) -> list[EntityRelation]:
+    """Edges a report narrative states in so many words.
+
+    The extractor has already done the reading: it kept only sentences carrying an explicit verb,
+    and only pairs found inside one sentence. What is left here is looking the two ends up as
+    resolved entities and recording the edge against the sentence that stated it.
+    """
+    attributes = record.event_attributes or {}
+    created: list[EntityRelation] = []
+
+    for attribute, relation_type, subject_field, object_field in (
+        ("stated_vehicle_use", USED_VEHICLE, "person_names", "vehicle_identifiers"),
+        ("stated_presence", LOCATED_AT, "person_names", "location_names"),
+    ):
+        pairs = attributes.get(attribute) or []
+        if not isinstance(pairs, list):
+            continue
+        reference = _field_reference(record, attribute, subject_field, object_field)
+        for pair in pairs:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                continue
+            subject = _entity_for_value(db, record, subject_field, str(pair[0]))
+            object_ = _entity_for_value(db, record, object_field, str(pair[1]))
+            if subject is None or object_ is None:
+                continue
+            relation = _add(
+                db,
+                record,
+                subject=subject,
+                object_=object_,
+                relation_type=relation_type,
+                directed=True,
+                basis="stated_in_sentence",
+                reference=reference,
+            )
+            if relation is not None:
+                created.append(relation)
+    return created
 
 
 def _co_occurrence_edges(db: Session, record: NormalizedRecord) -> list[EntityRelation]:
@@ -342,14 +405,33 @@ def _co_occurrence_edges(db: Session, record: NormalizedRecord) -> list[EntityRe
     return created
 
 
+def _states_a_stronger_relation(record: NormalizedRecord) -> bool:
+    """Whether this record says something more specific than "these were named together".
+
+    Asked of the record rather than of how many rows the current pass inserted. `_add` returns None
+    for an edge that already exists, so on a second pass -- and the builder runs over the whole case
+    every time any evidence is processed -- the stronger edges looked like nothing at all, and the
+    weak co-occurrence duplicates they exist to suppress were written after all.
+    """
+    if _values(record, "sender") and _values(record, "receiver"):
+        return True
+    attributes = record.event_attributes or {}
+    if attributes.get("stated_vehicle_use") or attributes.get("stated_presence"):
+        return True
+    if (record.source_type or "").lower() in CALL_SOURCES and len(_values(record, "phone_numbers")) == 2:
+        return True
+    return False
+
+
 def build_relations_for_record(db: Session, record: NormalizedRecord) -> int:
     """Every relation this one record states. Returns how many new observations were written."""
     created = _stated_party_edges(db, record)
     created += _call_log_edges(db, record)
+    created += _stated_role_edges(db, record)
 
     # Co-occurrence adds nothing where the source already stated the roles; a weak duplicate of a
-    # strong edge only makes the graph noisier.
-    if not created:
+    # strong edge only makes the graph noisier and the pair look better supported than it is.
+    if not _states_a_stronger_relation(record):
         created += _co_occurrence_edges(db, record)
 
     return len(created)
