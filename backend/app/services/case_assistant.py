@@ -183,6 +183,36 @@ def _labels_in(question: str, entities: Sequence[Entity]) -> list[Entity]:
     return found
 
 
+def _best_match(folded: str, entities: Sequence[Entity]) -> Entity | None:
+    """The entity a question term names, preferring the one that matches it exactly.
+
+    Matching by substring alone answered a question about "Suresh Yadav" with the record for
+    "Suresh Yadava" -- a different person, named in a different source, whom the graph had
+    correctly kept apart. Keeping two people separate in storage is worth nothing if a question
+    about one returns the other, so the same distinction has to hold at lookup.
+
+    Substring matching still runs, because evidence writes a number four ways and a question
+    writes a fifth. It runs second, and only after every exact reading has been ruled out.
+    """
+    for entity in entities:
+        if folded in {
+            re.sub(r"[^a-z0-9]+", "", (entity.value or "").lower()),
+            re.sub(r"[^a-z0-9]+", "", (entity.normalized_value or "").lower()),
+        }:
+            return entity
+
+    partial = [
+        entity
+        for entity in entities
+        if folded in re.sub(r"[^a-z0-9]+", "", f"{entity.value}{entity.normalized_value}".lower())
+    ]
+    if not partial:
+        return None
+    # Among partial readings the shortest label is the closest: "Suresh Yadav" inside both
+    # "Suresh Yadav" and "Suresh Yadava" belongs to the shorter of the two.
+    return min(partial, key=lambda entity: (len(entity.value or ""), entity.value or ""))
+
+
 def _match_entities(db: Session, case_id: str, terms: list[str], question: str = "") -> tuple[list[Entity], list[str]]:
     """Resolve question terms against this case's entities only.
 
@@ -196,14 +226,7 @@ def _match_entities(db: Session, case_id: str, terms: list[str], question: str =
         folded = re.sub(r"[^a-z0-9]+", "", term.lower())
         if not folded:
             continue
-        hit = next(
-            (
-                entity
-                for entity in entities
-                if folded and folded in re.sub(r"[^a-z0-9]+", "", f"{entity.value}{entity.normalized_value}".lower())
-            ),
-            None,
-        )
+        hit = _best_match(folded, entities)
         if hit is not None and hit.id not in {item.id for item in matched}:
             matched.append(hit)
         elif hit is None and len(term) > 2:

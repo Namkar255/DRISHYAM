@@ -93,6 +93,34 @@ def test_a_phone_is_one_node_not_two(processed_case) -> None:
     assert len(digits) == len(set(digits)), f"one number split across canonical forms: {sorted(keys)}"
 
 
+def test_a_name_matches_itself_not_the_one_it_is_a_prefix_of(processed_case) -> None:
+    """Keeping two people apart in the graph is worth nothing if a question about one returns
+    the other.
+
+    Matching by substring answered "Suresh Yadav" with the record for "Suresh Yadava" -- the
+    different person the surveillance note names -- so the distinction the storage layer
+    protects was lost at the moment anybody asked about it.
+    """
+    case, _ = processed_case
+    people = {item.normalized_value.casefold(): item for item in _entities(case["id"]) if item.entity_type == "person"}
+    exact = next((value for value in people if any(other != value and other.startswith(value) for other in people)), None)
+    if exact is None:
+        pytest.skip("this case produced no name that is a prefix of another")
+
+    answer = _ask(case["id"], f"Tell me about {exact}")
+    assert [item["label"].casefold() for item in answer.entities_understood] == [people[exact].value.casefold()]
+
+
+def test_a_longer_name_still_finds_itself(processed_case) -> None:
+    case, _ = processed_case
+    for entity in _entities(case["id"]):
+        if entity.entity_type != "person":
+            continue
+        answer = _ask(case["id"], f"Tell me about {entity.value}")
+        labels = [item["label"] for item in answer.entities_understood]
+        assert entity.value in labels, f"{entity.value} did not resolve to itself; got {labels}"
+
+
 # --------------------------------------------------------------------------- scope
 
 
