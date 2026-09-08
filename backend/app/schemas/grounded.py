@@ -338,3 +338,30 @@ class TemporalFindingResponse(BaseModel):
     # meaningful per finding: a burst has a duration, a pre-incident finding has a lead time.
     minutes: int | None = None
     hours_before: float | None = None
+
+
+class AssistantFinding(BaseModel):
+    """One statement the assistant makes, and the evidence it read it from."""
+
+    statement: str
+    evidence_ids: list[str] = []
+    source_reference: dict[str, Any] | None = None
+    verification_status: str | None = None
+    # Words copied from an uploaded file. Marked as a quotation because uploaded text is
+    # attacker-controlled: it is shown to the reader, never acted on.
+    quoted_source_text: str | None = None
+
+
+class CaseAssistantRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=600)
+
+
+class CaseAssistantResponse(BaseModel):
+    question: str
+    intent: str
+    answer: str
+    findings: list[AssistantFinding]
+    entities_understood: list[dict[str, str]]
+    unresolved_terms: list[str]
+    caveat: str
+    assistant_version: str

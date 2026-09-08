@@ -31,6 +31,8 @@ from app.schemas.grounded import (
     EntityRelationPage,
     EntityRelationReviewRequest,
     EntityRelationSummary,
+    CaseAssistantRequest,
+    CaseAssistantResponse,
     CaseChronologyResponse,
     EvidenceStagesResponse,
     ImportantEntityResponse,
@@ -55,7 +57,7 @@ from app.schemas.grounded import (
 )
 from app.core.security import utcnow
 from app.graph import analytics
-from app.services import record_review, relationship_builder, temporal
+from app.services import case_assistant, record_review, relationship_builder, temporal
 from app.services.audit import audit
 from app.services.cases import require_case_access
 from app.services.grounded_pipeline import GROUNDED_PIPELINE_VERSION, UI_STAGE_ORDER
@@ -712,3 +714,39 @@ def communication_bursts(case_id: str, current_user: CurrentUser, db: DbSession)
         _temporal_finding(entry, entities, f"{entry['contacts']} contacts within {entry['minutes']} minutes.")
         for entry in temporal.communication_bursts(db, case_id)
     ]
+
+
+# --------------------------------------------------------------------------- case assistant
+
+
+@router.post("/assistant/ask", response_model=CaseAssistantResponse)
+def ask_case_assistant(
+    case_id: str,
+    payload: CaseAssistantRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> CaseAssistantResponse:
+    """Answer a question about this case, from this case's own rows.
+
+    Authorisation is checked before anything is read, so a question can never be used to discover
+    whether an identifier appears in a case the asker cannot open.
+
+    Distinct from the Trace Orb help assistant, which explains the product and is unable to reach
+    case data at all. This one reaches only case data, and only for one authorised case.
+    """
+    require_case_access(db, case_id, current_user)
+    answer = case_assistant.ask(db, case_id, payload.question)
+    audit(
+        db,
+        action="grounded.assistant_question",
+        object_type="case",
+        object_id=case_id,
+        case_id=case_id,
+        outcome="success",
+        actor_id=current_user.id,
+        # The question is recorded, the answer is not: what a user asked is an access record, and
+        # storing the composed reply would duplicate case content into the audit log.
+        details={"intent": answer.intent, "question_length": len(payload.question)},
+    )
+    db.commit()
+    return CaseAssistantResponse(**answer.to_dict())
