@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,8 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import EvidenceFile, RawExtractionArtifact
 from app.services.storage import get_private_path
+
+logger = logging.getLogger(__name__)
 
 VIEW_VERSION = "source-view-v1"
 
@@ -57,6 +60,14 @@ IMAGE_PREFIX = "image/"
 # A file this size is not something a reviewer scrolls; it is something they download.
 MAX_TEXT_LINES = 4000
 MAX_TABLE_ROWS = 2000
+
+# A PDF page is rendered at twice its natural size so the marks sit on readable text rather than on
+# a thumbnail. Higher costs bandwidth for no gain on a screen.
+PDF_RENDER_SCALE = 2.0
+
+# A search string longer than this is more likely to span a line break than to match, and a line
+# that wraps in the file will never be found whole.
+PDF_SEARCH_LIMIT = 80
 
 
 @dataclass
@@ -134,6 +145,11 @@ class SourceView:
     width: int | None = None
     height: int | None = None
     page_count: int | None = None
+    # True when the file can be shown as a rendered page carrying marks, rather than only as text.
+    # A PDF is a picture of a document, and marking the page is the only way to show a reader the
+    # place rather than tell them its number.
+    page_image: bool = False
+    page_number: int | None = None
     regions: list[Region] = field(default_factory=list)
     header: list[str] = field(default_factory=list)
     rows: list[Row] = field(default_factory=list)
@@ -157,6 +173,8 @@ class SourceView:
             "width": self.width,
             "height": self.height,
             "page_count": self.page_count,
+            "page_image": self.page_image,
+            "page_number": self.page_number,
             "regions": [item.to_dict() for item in self.regions],
             "header": self.header,
             "rows": [item.to_dict() for item in self.rows],
@@ -421,6 +439,66 @@ def _lines_from_file(path: Path) -> list[Line]:
     return [Line(number=index, text=line) for index, line in enumerate(text.splitlines(), start=1)]
 
 
+def _pdf_page_marks(path: Path, page_number: int, cited_text: str | None, value: str | None) -> tuple[int, int, list[Region], int]:
+    """Where the cited line and the traced value sit on a rendered PDF page.
+
+    A PDF is a picture of a document. Telling a reviewer "page 1, line 6" makes them count lines;
+    drawing the box makes them look. PyMuPDF is already how this project reads PDFs, and it reports
+    the rectangle of any text it finds, so the same page a reader sees can carry the same two marks
+    an image carries.
+
+    Coordinates come back in points and are scaled to the rendered pixel size, so the client can
+    place them as percentages without knowing anything about PDF geometry.
+    """
+    import fitz
+
+    regions: list[Region] = []
+    with fitz.open(path) as document:
+        count = document.page_count
+        index = max(0, min(page_number - 1, count - 1))
+        page = document[index]
+        # The same rounding the renderer uses, so the marks and the picture agree to the pixel.
+        # Deriving the size arithmetically was off by one against the rendered page.
+        canvas = (page.rect * fitz.Matrix(PDF_RENDER_SCALE, PDF_RENDER_SCALE)).irect
+        width, height = canvas.width, canvas.height
+
+        def find(needle: str) -> list[Any]:
+            needle = needle.strip()
+            if not needle:
+                return []
+            for attempt in (needle[:PDF_SEARCH_LIMIT], needle[:40], needle[:24]):
+                hits = page.search_for(attempt)
+                if hits:
+                    return hits
+            return []
+
+        seen: set[tuple[int, int, int, int]] = set()
+        for needle, cited in ((cited_text, True), (value, False)):
+            if not needle:
+                continue
+            for order, rect in enumerate(find(needle), start=1):
+                box = (
+                    rect.x0 * PDF_RENDER_SCALE,
+                    rect.y0 * PDF_RENDER_SCALE,
+                    rect.x1 * PDF_RENDER_SCALE,
+                    rect.y1 * PDF_RENDER_SCALE,
+                )
+                key = tuple(int(value) for value in box)  # type: ignore[assignment]
+                if key in seen:
+                    continue
+                seen.add(key)  # type: ignore[arg-type]
+                regions.append(Region(
+                    id=f"p{index + 1}-{'cited' if cited else 'also'}-{order}",
+                    text=needle[:PDF_SEARCH_LIMIT],
+                    bbox=box,
+                    page=index + 1,
+                    highlight=True,
+                    cited=cited,
+                ))
+
+    return width, height, regions, count
+
+
 def _text_view(db: Session, evidence: EvidenceFile, storage_key: str, suffix: str, target: Target) -> SourceView:
     # A plain text file is shown from its own bytes, so a reviewer sees blank lines and spacing
     # exactly as the file has them. A PDF cannot be read that way here, so its recorded lines are
@@ -481,7 +559,39 @@ def _text_view(db: Session, evidence: EvidenceFile, storage_key: str, suffix: st
     others = len(marked) - len(cited or [marked[0]])
     if others > 0:
         view.occurrence_summary = f"also appears on {others} other line{'' if others == 1 else 's'} of this file"
+
+    # A PDF can be shown as the page itself, with the same marks drawn on it.
+    if suffix == ".pdf":
+        anchor = next((line for line in lines if line.cited), None)
+        try:
+            width, height, regions, count = _pdf_page_marks(
+                get_private_path(storage_key),
+                anchor.page or 1 if anchor else (target.page or 1),
+                anchor.text if anchor else None,
+                target.value,
+            )
+        except Exception:  # noqa: BLE001 - a page that will not render must not take the panel down
+            logger.info("Could not render page marks for evidence %s", evidence.id, exc_info=True)
+        else:
+            view.page_image = bool(regions) or bool(width and height)
+            view.page_number = anchor.page or 1 if anchor else (target.page or 1)
+            view.width, view.height, view.regions = width, height, regions
+            view.page_count = count
     return view
+
+
+def render_page(path: Path, page_number: int) -> bytes:
+    """One PDF page as a PNG, at the scale the marks were measured against.
+
+    The marks are reported in rendered pixels, so the picture they are drawn on has to be rendered
+    the same way. Any other scale would put every box in the wrong place.
+    """
+    import fitz
+
+    with fitz.open(path) as document:
+        index = max(0, min(page_number - 1, document.page_count - 1))
+        pixmap = document[index].get_pixmap(matrix=fitz.Matrix(PDF_RENDER_SCALE, PDF_RENDER_SCALE))
+        return pixmap.tobytes("png")
 
 
 # --------------------------------------------------------------------------- entry point

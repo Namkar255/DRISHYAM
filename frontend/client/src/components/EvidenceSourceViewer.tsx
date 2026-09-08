@@ -20,7 +20,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileWarning, Loader2, Minus, Plus, X } from "lucide-react";
-import { getOriginalObjectUrl, getSourceView, type SourceLine, type SourceTarget, type SourceViewRecord } from "@/api/sourceView";
+import { getOriginalObjectUrl, getPageObjectUrl, getSourceView, type SourceLine, type SourceTarget, type SourceViewRecord } from "@/api/sourceView";
 
 export type SourceRequest = {
   caseId: string;
@@ -64,12 +64,12 @@ function ImageSource({ view, url }: { view: SourceViewRecord; url: string | null
 
   return <div className="flex min-h-0 flex-1 flex-col">
     <div className="flex items-center justify-between border-b border-[#eadfd3] bg-[#fffaf3] px-4 py-2">
-      <span className="text-[9px] font-bold uppercase tracking-[.12em] text-[#8f493f]">{view.width}×{view.height} px · {view.regions.length} text regions</span>
+      <span className="text-[9px] font-bold uppercase tracking-[.12em] text-[#8f493f]">{view.page_image ? `Page ${view.page_number} of ${view.page_count} · ${marked.length} marked` : `${view.width}×${view.height} px · ${view.regions.length} text regions`}</span>
       <span className="flex items-center gap-2">
-        <label className="flex items-center gap-1.5 text-[9px] font-bold text-[#6b5b51]">
+        {!view.page_image && <label className="flex items-center gap-1.5 text-[9px] font-bold text-[#6b5b51]">
           <input type="checkbox" checked={showAll} onChange={(event) => setShowAll(event.target.checked)} className="accent-[#7f1d1d]"/>
           Show every region
-        </label>
+        </label>}
         <button onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))} aria-label="Zoom out" className="grid h-6 w-6 place-items-center rounded border border-[#dbcbbd] bg-white text-[#6b5b51]"><Minus size={12}/></button>
         <span className="mono w-9 text-center text-[9px] font-bold text-[#6b5b51]">{Math.round(zoom * 100)}%</span>
         <button onClick={() => setZoom((value) => Math.min(3, value + 0.25))} aria-label="Zoom in" className="grid h-6 w-6 place-items-center rounded border border-[#dbcbbd] bg-white text-[#6b5b51]"><Plus size={12}/></button>
@@ -180,19 +180,24 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
     return () => { live = false; };
   }, [key]);
 
-  // A picture and a PDF are shown from their own bytes. A table and a text file are already
-  // rendered from what the server returned, in both modes.
-  const needsBytes = view?.kind === "image" || view?.media_type === "application/pdf";
+  // A picture is shown from its own bytes; a document is shown as a rendered page, because the
+  // browser's PDF viewer draws no marks and a citation a reader has to count lines to find is a
+  // citation they will not check. A table and a text file need no bytes in either mode.
+  const asPage = Boolean(view?.page_image && view?.kind === "text");
+  const needsBytes = view?.kind === "image" || asPage;
   useEffect(() => {
-    if (!request || !needsBytes) return;
+    if (!request || !needsBytes || !view) return;
     let live = true;
     let created: string | null = null;
-    getOriginalObjectUrl(request.caseId, request.evidenceId).then((url) => {
+    const fetching = asPage
+      ? getPageObjectUrl(request.caseId, request.evidenceId, view.page_number ?? 1)
+      : getOriginalObjectUrl(request.caseId, request.evidenceId);
+    fetching.then((url) => {
       created = url;
       if (live) setObjectUrl(url); else URL.revokeObjectURL(url);
     }).catch(() => undefined);
     return () => { live = false; if (created) URL.revokeObjectURL(created); setObjectUrl(null); };
-  }, [needsBytes, request?.evidenceId]);
+  }, [needsBytes, asPage, view?.page_number, request?.evidenceId]);
 
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
@@ -213,8 +218,7 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
 
   // What "original" means depends on the file: a picture is always its own original, a PDF is
   // shown by the browser, and a table has the text it arrived as.
-  const isPdf = view?.media_type === "application/pdf";
-  const hasOriginal = Boolean(view && (view.kind === "image" || isPdf || view.raw_lines.length));
+  const hasOriginal = Boolean(view && (view.kind === "image" || asPage || view.raw_lines.length));
   const showOriginal = mode === "original" && hasOriginal;
 
   return <>
@@ -267,10 +271,8 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
           ? <LineSource lines={view.raw_lines} truncated={view.truncated}/>
           : <TableSource view={view}/>)}
 
-        {view.kind === "text" && (showOriginal && isPdf
-          ? (objectUrl
-              ? <iframe title={`Original evidence: ${view.original_name}`} src={`${objectUrl}#page=${view.lines.find((line) => line.cited)?.page ?? 1}`} className="min-h-0 flex-1 border-0 bg-[#2a2320]"/>
-              : <p className="p-5 text-[11px] text-[#76695e]">Loading the original document…</p>)
+        {view.kind === "text" && (showOriginal && asPage
+          ? <ImageSource view={view} url={objectUrl}/>
           : <LineSource lines={view.lines} truncated={view.truncated}/>)}
       </>}
 

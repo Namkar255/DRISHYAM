@@ -41,6 +41,9 @@ export type SourceViewRecord = {
   width: number | null;
   height: number | null;
   page_count: number | null;
+  /** True when the file can be shown as a rendered page carrying the same marks an image carries. */
+  page_image: boolean;
+  page_number: number | null;
   regions: SourceRegion[];
   header: string[];
   rows: SourceRow[];
@@ -82,6 +85,12 @@ export async function getSourceView(caseId: string, evidenceId: string, target: 
  */
 export async function getOriginalObjectUrl(caseId: string, evidenceId: string): Promise<string> {
   const response = await apiClient.get(`/cases/${caseId}/evidence/${evidenceId}/original`, { responseType: "blob" });
+  return URL.createObjectURL(response.data as Blob);
+}
+
+/** One page of a document, rendered so the marks can be drawn on it. */
+export async function getPageObjectUrl(caseId: string, evidenceId: string, page: number): Promise<string> {
+  const response = await apiClient.get(`/cases/${caseId}/evidence/${evidenceId}/page/${page}`, { responseType: "blob" });
   return URL.createObjectURL(response.data as Blob);
 }
 

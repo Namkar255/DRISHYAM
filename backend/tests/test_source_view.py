@@ -166,6 +166,54 @@ def test_a_table_carries_its_own_text_as_well_as_its_grid(sourced_case) -> None:
     assert "a_party" in view.raw_lines[0].text, "line 1 of the file is its header"
 
 
+def test_a_pdf_is_also_offered_as_a_marked_page(sourced_case) -> None:
+    """A PDF is a picture of a record.
+
+    Citing "page 1, line 6" makes a reviewer count lines, and a citation somebody has to count
+    lines to find is a citation they will not check. The page is rendered and the same two marks
+    are placed on it, in the pixel coordinates of that render.
+    """
+    case, _ = sourced_case
+    view = _view(_evidence(case["id"], "fir_primary"), page=1, line_start=6, value="Ravi Kumar")
+
+    assert view.page_image and view.page_number == 1
+    assert view.width and view.height, "marks cannot be placed without the rendered page size"
+
+    cited = [region for region in view.regions if region.cited]
+    others = [region for region in view.regions if region.highlight and not region.cited]
+    assert len(cited) == 1, "exactly one region is the citation"
+    assert others, "the traced value appears elsewhere on this page and was not marked"
+
+    for region in view.regions:
+        x0, y0, x1, y1 = region.bbox
+        assert 0 <= x0 < x1 <= view.width and 0 <= y0 < y1 <= view.height
+
+
+def test_the_rendered_page_is_a_png_at_the_scale_the_marks_assume(sourced_case) -> None:
+    """Any other scale would put every box in the wrong place."""
+    from app.services.storage import get_private_path
+
+    case, _ = sourced_case
+    evidence = _evidence(case["id"], "fir_primary")
+    view = _view(evidence, page=1, line_start=6)
+
+    image = source_view.render_page(get_private_path(evidence.storage_key), 1)
+    assert image[1:4] == b"PNG" and image[0] == 0x89
+
+    from PIL import Image
+    import io as _io
+
+    with Image.open(_io.BytesIO(image)) as rendered:
+        assert rendered.size == (view.width, view.height)
+
+
+def test_the_page_endpoint_refuses_a_file_that_has_no_pages(client, sourced_case) -> None:
+    case, headers = sourced_case
+    evidence = _evidence(case["id"], "cdr_synthetic")
+    response = client.get(f"/api/v1/cases/{case['id']}/evidence/{evidence.id}/page/1", headers=headers)
+    assert response.status_code == 400
+
+
 # --------------------------------------------------------------------------- refusing to guess
 
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
@@ -119,6 +119,46 @@ def read_source_view(
     )
     db.commit()
     return view.to_dict()
+
+
+@router.get("/{evidence_id}/page/{page_number}")
+def read_rendered_page(
+    case_id: str,
+    evidence_id: str,
+    page_number: int,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> Response:
+    """One page of a document, rendered as an image so marks can be drawn on it.
+
+    A PDF is a picture of a record. Citing "page 1, line 6" makes a reviewer count lines; showing
+    the page with the line boxed makes them look. The image is rendered at the same scale the
+    marks were measured against, so a client can place them without knowing any PDF geometry.
+    """
+    require_case_access(db, case_id, current_user)
+    evidence = db.scalar(select(EvidenceFile).where(EvidenceFile.id == evidence_id, EvidenceFile.case_id == case_id))
+    if not evidence:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence record not found")
+    if (evidence.detected_mime or "") != "application/pdf":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This evidence is not a document with pages")
+
+    try:
+        image = source_view.render_page(get_private_path(evidence.storage_key), page_number)
+    except Exception as error:  # noqa: BLE001 - a page that will not render is a 404, not a crash
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="That page could not be rendered") from error
+
+    audit(
+        db,
+        action="evidence.page_render",
+        object_type="evidence_file",
+        object_id=evidence.id,
+        case_id=case_id,
+        outcome="success",
+        actor_id=current_user.id,
+        details={"page": page_number},
+    )
+    db.commit()
+    return Response(content=image, media_type="image/png")
 
 
 @router.post("/{evidence_id}/process", response_model=EvidenceResponse)
