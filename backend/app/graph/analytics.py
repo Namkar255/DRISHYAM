@@ -215,7 +215,10 @@ def important_entities(
             scores = nx.betweenness_centrality(graph, weight="distance", normalized=True)
 
     communities = _community_index(graph)
-    bridge_nodes = {node for pair in nx.bridges(graph) for node in pair} if graph.number_of_edges() else set()
+    # An articulation point is a node whose removal disconnects the graph. Taking the endpoints of
+    # bridge *edges* instead marked every leaf as a bridge -- and removing a leaf splits nothing,
+    # so eight of eleven ranked entities carried the claim "removing it would split the network".
+    cut_nodes = set(nx.articulation_points(graph)) if graph.number_of_edges() else set()
 
     ranked = []
     for node, score in sorted(scores.items(), key=lambda item: (-item[1], graph.nodes[item[0]]["label"])):
@@ -237,8 +240,8 @@ def important_entities(
                 "connections": len(neighbours),
                 "supporting_evidence_count": len(evidence),
                 "communities_linked": len({communities[other] for other in neighbours if other in communities}),
-                "is_bridge": node in bridge_nodes,
-                "why": _explain(graph, node, metric=metric, communities=communities, is_bridge=node in bridge_nodes),
+                "is_bridge": node in cut_nodes,
+                "why": _explain(graph, node, metric=metric, communities=communities, is_bridge=node in cut_nodes),
                 "caveat": IMPORTANCE_CAVEAT,
             }
         )
