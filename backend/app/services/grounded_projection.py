@@ -340,4 +340,14 @@ def project_case(db: Session, case_id: str) -> dict[str, int]:
     from app.services.relationship_builder import build_relations_for_case
 
     totals["entity_relations"] = build_relations_for_case(db, case_id)["relations_added"]
+
+    # Pattern rules read the relationships, so they run last. A failure here must not cost the
+    # projection that already succeeded.
+    from app.alerts.network_rules import evaluate_network_alerts
+
+    try:
+        totals["network_alerts"] = evaluate_network_alerts(db, case_id)["total_new"]
+    except Exception:
+        logger.exception("Network pattern rules failed; relationships and projections are unaffected")
+        totals["network_alerts"] = 0
     return totals
