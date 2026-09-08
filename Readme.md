@@ -49,7 +49,8 @@ These capabilities are required by SIH26189 and are being added on the existing 
 | Network analytics: centrality, bridge detection, communities | **Done** — betweenness/degree/eigenvector, Louvain communities, bridges, weighted shortest paths and hop-limited subgraphs. Every ranked entity carries a countable explanation and a caveat; a bare score is never returned |
 | CDR and FIR source adapters | Planned — generic CSV, PDF, image and email parsing already works |
 | Temporal analytics and incident-window pattern rules | Planned — five explainable alert rules already run |
-| Entity Profile and Relationship Detail drill-down screens | Planned |
+| Network Intelligence workspace view | **Done** — relationship map, ranked entities with explanations, bridges, groups, path tracing, and a relationship table whose every row opens at the row, page or image region it was read from |
+| Entity Profile and Relationship Detail drill-down | **Done** — entity neighbourhoods load one hop at a time; relationship review is recorded from the drawer |
 | Case-grounded, permission-aware assistant | Planned — separate from the Trace Orb help assistant |
 
 ## Investigation workflow
