@@ -62,6 +62,9 @@ AUTHORITATIVE_FIELDS = frozenset(
     }
 )
 
+# Narrative sources whose text carries report structure and stated roles.
+REPORT_SOURCE_TYPES = frozenset({SourceType.FIR, SourceType.POLICE_REPORT, SourceType.SURVEILLANCE})
+
 BANK_COLUMN_ALIASES = {
     "amount": ("amount", "txn amount", "transaction amount", "value", "credit", "debit"),
     "transaction_reference": ("utr", "reference", "reference id", "reference_no", "transaction id", "txn id", "rrn"),
@@ -71,12 +74,22 @@ BANK_COLUMN_ALIASES = {
     "account_identifiers": ("account", "account no", "account number", "a/c", "ifsc", "upi", "upi id"),
     "narration": ("narration", "particulars", "description", "remarks", "purpose"),
 }
+# A CDR names the two ends of a call in separate columns. Reading them into one list, as this map
+# previously did, threw away who dialled -- so a call log could only ever produce a symmetric
+# "these two were in contact" edge. Mapping the A-party and B-party onto the stated-role fields is
+# what lets a directed CALLED relationship exist at all.
 CALL_LOG_COLUMN_ALIASES = {
-    "phone_numbers": ("number", "phone", "caller", "callee", "contact", "msisdn"),
-    "event_time": ("date", "time", "timestamp", "call date", "start time"),
+    "sender": ("a-party", "a party", "aparty", "caller", "calling number", "calling party", "from", "originating number", "msisdn_a", "a_number"),
+    "receiver": ("b-party", "b party", "bparty", "callee", "called number", "called party", "to", "terminating number", "msisdn_b", "b_number"),
+    # Kept for logs that print one bare number column and leave the roles unstated.
+    "phone_numbers": ("number", "phone", "contact", "msisdn"),
+    "event_time": ("date", "time", "timestamp", "call date", "start time", "call start"),
     "message_direction": ("direction", "call type", "call_type", "type"),
-    "duration": ("duration", "call duration", "seconds"),
-    "device_identifier": ("imei", "device", "device id"),
+    "duration": ("duration", "call duration", "seconds", "duration_seconds"),
+    "device_identifier": ("imei", "device", "device id", "imsi"),
+    # A cell site is where the handset was, not a place name, so it stays an attribute of the event
+    # rather than becoming a location node.
+    "cell_site": ("cell id", "cell_id", "cell", "tower", "tower id", "site id", "lac", "cgi"),
 }
 
 
@@ -294,10 +307,19 @@ class DeterministicExtractor:
             return self._chat_export(path, evidence_id=evidence_id)
         if source_type is SourceType.EMAIL:
             return self._email(path, evidence_id=evidence_id)
-        if source_type in {SourceType.CSV, SourceType.BANK_RECORD, SourceType.CALL_LOG, SourceType.SPREADSHEET}:
+        if source_type in {SourceType.CSV, SourceType.BANK_RECORD, SourceType.CALL_LOG, SourceType.CDR, SourceType.SPREADSHEET}:
             return self._tabular(path, evidence_id=evidence_id, source_type=source_type, extension=detected.extension)
-        if source_type is SourceType.PDF:
-            return self._pdf(path, evidence_id=evidence_id)
+        if source_type in {SourceType.PDF, *REPORT_SOURCE_TYPES}:
+            # A police report or surveillance note is a document; the source type only changes what
+            # the extractor additionally looks for in the text it recovers.
+            extraction = (
+                self._pdf(path, evidence_id=evidence_id, source_type=source_type)
+                if detected.extension == ".pdf"
+                else self._plain_document(path, evidence_id=evidence_id, source_type=source_type)
+            )
+            if source_type in REPORT_SOURCE_TYPES:
+                _report_enrichment(extraction, evidence_id=evidence_id)
+            return extraction
         return self._plain_document(path, evidence_id=evidence_id, source_type=source_type)
 
     # ---------------------------------------------------------------- images
@@ -526,7 +548,7 @@ class DeterministicExtractor:
 
     def _tabular(self, path: Path, *, evidence_id: str, source_type: SourceType, extension: str) -> RawExtraction:
         rows, header = _read_table(path, extension)
-        aliases = CALL_LOG_COLUMN_ALIASES if source_type is SourceType.CALL_LOG else BANK_COLUMN_ALIASES
+        aliases = CALL_LOG_COLUMN_ALIASES if source_type in {SourceType.CALL_LOG, SourceType.CDR} else BANK_COLUMN_ALIASES
         mapping = _map_columns(header, aliases)
 
         units: list[ExtractionUnit] = []
@@ -576,7 +598,7 @@ class DeterministicExtractor:
 
     # ------------------------------------------------------------------- pdf
 
-    def _pdf(self, path: Path, *, evidence_id: str) -> RawExtraction:
+    def _pdf(self, path: Path, *, evidence_id: str, source_type: SourceType = SourceType.PDF) -> RawExtraction:
         import fitz
 
         document = fitz.open(path)
@@ -647,6 +669,51 @@ class DeterministicExtractor:
             layers=[ExtractionLayer("native_text", self.version, {"characters": len(text), "lines": len(text.splitlines())})],
             quality_flags=[] if units else ["incomplete"],
         )
+
+
+def _report_enrichment(extraction: RawExtraction, *, evidence_id: str) -> None:
+    """Read what a police report or surveillance note states about itself, and about who did what.
+
+    Two separate things, and they are kept separate on purpose.
+
+    The header fields -- FIR number, sections, station -- are printed metadata. They are attached to
+    the first unit as attributes of the document, not as claims about anyone.
+
+    The role links are read one sentence at a time, and only where the sentence carries the verb.
+    "Suresh Yadav was driving MH12DE1433" states that he used it; the same two strings appearing in
+    different sentences on the same page state nothing, and turning that into a relationship is the
+    invention this pipeline exists to refuse.
+    """
+    whole = SourceReference(evidence_id=evidence_id, kind="document")
+
+    header: dict[str, FieldProvenance] = {}
+    if number := patterns.find_fir_number(extraction.text):
+        header["fir_number"] = _direct(number, quote=number, reference=whole, confidence=0.97)
+    if sections := patterns.find_fir_sections(extraction.text):
+        header["fir_sections"] = _direct(sections, quote=", ".join(sections), reference=whole, confidence=0.94)
+    if station := patterns.find_police_station(extraction.text):
+        header["police_station"] = _direct(station, quote=station, reference=whole, confidence=0.95)
+    if header and extraction.units:
+        extraction.units[0].facts.update(header)
+
+    for unit in extraction.units:
+        if vehicle_links := patterns.find_person_vehicle_links(unit.text):
+            unit.facts["stated_vehicle_use"] = _direct(
+                [[person, vehicle] for person, vehicle, _ in vehicle_links],
+                quote=vehicle_links[0][2],
+                reference=unit.reference,
+                confidence=0.82,
+            )
+        if presence_links := patterns.find_person_location_links(unit.text):
+            unit.facts["stated_presence"] = _direct(
+                [[person, place] for person, place, _ in presence_links],
+                quote=presence_links[0][2],
+                reference=unit.reference,
+                confidence=0.78,
+            )
+            unit.facts["stated_presence"].reason = (
+                "The sentence places the person somewhere. It does not establish that they were there at any stated time."
+            )
 
 
 def _paragraph_units(text: str, *, evidence_id: str, page: int | None) -> list[ExtractionUnit]:

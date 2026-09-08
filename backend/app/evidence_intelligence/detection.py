@@ -22,7 +22,14 @@ CHAT_EXPORT_LINE = re.compile(
 )
 BANK_COLUMN_MARKERS = {"amount", "credit", "debit", "balance", "utr", "reference", "transaction", "narration", "particulars"}
 CALL_LOG_COLUMN_MARKERS = {"duration", "call_type", "call type", "caller", "callee", "number", "direction"}
+# A record that names both ends of the call separately carries who dialled, which a plain
+# call log does not. Recognising it by its header means an operator export is read correctly
+# even when the uploader did not pick the category.
+CDR_COLUMN_MARKERS = {"a-party", "a party", "b-party", "b party", "calling number", "called number",
+                     "originating number", "terminating number", "msisdn_a", "msisdn_b", "a_number", "b_number"}
 
+# Narrative report sources. They parse like any document, but the extractor reads report
+# structure and stated roles out of them as well.
 CATEGORY_HINTS = {
     "whatsapp_screenshot": SourceType.SCREENSHOT,
     "screenshot": SourceType.SCREENSHOT,
@@ -34,7 +41,20 @@ CATEGORY_HINTS = {
     "call_log": SourceType.CALL_LOG,
     "phishing_email": SourceType.EMAIL,
     "email": SourceType.EMAIL,
+    # SIH26189 names police reports and surveillance notes as primary sources. They are
+    # ordinary documents to the parser; the category is what tells the extractor to also read
+    # the report header and the stated roles in the narrative.
+    "complaint_fir": SourceType.FIR,
+    "fir": SourceType.FIR,
+    "police_report": SourceType.POLICE_REPORT,
+    "surveillance": SourceType.SURVEILLANCE,
+    "surveillance_report": SourceType.SURVEILLANCE,
+    "cdr": SourceType.CDR,
 }
+
+# Narrative report sources. They parse like any document, but the extractor reads report
+# structure and the roles stated in the narrative out of them as well.
+DOCUMENT_REPORT_TYPES = frozenset({SourceType.FIR, SourceType.POLICE_REPORT, SourceType.SURVEILLANCE})
 
 
 @dataclass(frozen=True)
@@ -73,6 +93,8 @@ class ContentFileTypeDetector:
             return DetectedType(source_type, extension, mime, basis="content+category" if hinted else "content")
 
         if extension == ".pdf":
+            if hinted in DOCUMENT_REPORT_TYPES:
+                return DetectedType(hinted, extension, mime, basis="content+category")
             return DetectedType(SourceType.PDF, extension, mime)
 
         if extension == ".eml":
@@ -85,6 +107,8 @@ class ContentFileTypeDetector:
             return DetectedType(hinted or SourceType.SPREADSHEET, extension, mime, basis="content+category" if hinted else "content")
 
         if extension == ".txt":
+            if hinted in DOCUMENT_REPORT_TYPES:
+                return DetectedType(hinted, extension, mime, basis="category")
             if hinted in {SourceType.CHAT_EXPORT, SourceType.EMAIL}:
                 return DetectedType(hinted, extension, mime, basis="category")
             return DetectedType(_text_type(path), extension, mime, basis="content")
@@ -124,7 +148,7 @@ def _text_type(path: Path) -> SourceType:
 
 
 def _tabular_type(path: Path, hinted: SourceType | None) -> SourceType:
-    if hinted in {SourceType.BANK_RECORD, SourceType.CALL_LOG}:
+    if hinted in {SourceType.BANK_RECORD, SourceType.CALL_LOG, SourceType.CDR}:
         return hinted
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as stream:
@@ -133,6 +157,8 @@ def _tabular_type(path: Path, hinted: SourceType | None) -> SourceType:
     except (OSError, StopIteration, csv.Error):
         return SourceType.CSV
     joined = set(header)
+    if joined & CDR_COLUMN_MARKERS:
+        return SourceType.CDR
     if joined & CALL_LOG_COLUMN_MARKERS and not joined & {"amount", "credit", "debit", "balance"}:
         return SourceType.CALL_LOG
     if joined & BANK_COLUMN_MARKERS:
