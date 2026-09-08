@@ -247,6 +247,42 @@ def measure_relations(db, case_id: str, resolved: dict[str, Entity]) -> Measurem
     return measurement
 
 
+def measure_image_only_identifiers(db, case_id: str, outcomes: dict[str, dict]) -> Measurement:
+    """Identifiers that exist on the strength of one image and nothing else.
+
+    Reading text off a photograph is where a wrong character becomes a wrong node. In this case a
+    blurred screenshot yields "+919676543210" -- one digit away from a number written plainly in
+    four other files -- and a truncated handle, both of which enter the graph looking exactly like
+    an identifier somebody wrote down.
+
+    This is reported, not graded. OCR misreads a degraded image; that is a fact about images, not a
+    defect to be failed. What matters is that they are countable and nameable, so the review queue
+    can be pointed at them and a claim about them can be stated honestly.
+
+    Lower is better, so `found` counts the identifiers that were corroborated somewhere else.
+    """
+    image_sources = {
+        data["evidence_id"]
+        for name, data in outcomes.items()
+        if benchmark_case.ARTIFACTS.get(name) in {"whatsapp_screenshot", "screenshot", "chat_screenshot"}
+        and data["evidence_id"]
+    }
+    identifier_types = {"phone", "email", "upi", "account", "ifsc", "reference", "url", "vehicle", "device"}
+
+    measurement = Measurement("identifiers corroborated outside an image", 0, 0)
+    for entity in _entities(db, case_id):
+        if entity.entity_type not in identifier_types:
+            continue
+        sources = _sources_for(db, entity)
+        if not sources or not sources <= image_sources:
+            measurement.expected += 1
+            measurement.found += 1
+            continue
+        measurement.expected += 1
+        measurement.detail.append(f"only an image supports {entity.value} ({entity.entity_type}) — a review lead, not a fact")
+    return measurement
+
+
 def measure_traceability(db, case_id: str) -> Measurement:
     """The headline claim: every stored statement names the evidence it came from."""
     rows = 0
@@ -430,6 +466,7 @@ def main() -> int:
                 *entity_measurements,
                 measure_cross_source(db, case_id, resolved, outcomes),
                 measure_relations(db, case_id, resolved),
+                measure_image_only_identifiers(db, case_id, outcomes),
                 measure_traceability(db, case_id),
             ]
             checks = [
