@@ -10,8 +10,10 @@
  * right of a card at full weight the way the overview metrics use it.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, Check, Loader2, Network, RefreshCw, Route, ShieldCheck, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, FileSearch, Loader2, Network, RefreshCw, Route, ShieldCheck, Users, X } from "lucide-react";
 import { getApiErrorMessage } from "@/api/client";
+import EvidenceSourceViewer from "@/components/EvidenceSourceViewer";
+import { targetFromReference } from "@/api/sourceView";
 import {
   getEntityRelationSummary, getEntityRelations, getImportantEntities, getNetworkBridges, getNetworkCommunities, getNetworkOverview, getNetworkPath, getNetworkSubgraph, reviewEntityRelation,
   type ImportanceMetric,
@@ -73,8 +75,9 @@ function Metric({ label, value, detail, image, tone = "burgundy" }) {
   </article>;
 }
 
-function ImportanceCard({ record, onOpen }) {
-  return <button onClick={onOpen} className="w-full rounded-xl border border-[#e8dccf] bg-[#fffdf8] p-4 text-left shadow-[0_6px_16px_rgba(82,49,36,.05)] transition hover:-translate-y-0.5 hover:border-[#bd8177] hover:shadow-[0_12px_26px_rgba(82,49,36,.1)]">
+function ImportanceCard({ record, onOpen, onOpenSource }) {
+  return <div className="w-full rounded-xl border border-[#e8dccf] bg-[#fffdf8] p-4 text-left shadow-[0_6px_16px_rgba(82,49,36,.05)] transition hover:-translate-y-0.5 hover:border-[#bd8177] hover:shadow-[0_12px_26px_rgba(82,49,36,.1)]">
+    <button onClick={onOpen} className="w-full text-left" aria-label={`Open details for ${record.label}`}>
     <div className="flex items-start justify-between gap-3">
       <span className="flex min-w-0 items-center gap-2.5"><i className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: entityTone(record.entity_type) }} /><span className="min-w-0"><b className="block truncate text-[12px] font-bold text-[#2e2520]">{record.label}</b><small className="mono mt-0.5 block text-[8px] font-bold uppercase tracking-[.1em] text-[#9b8a7c]">{record.entity_type}</small></span></span>
       <span className="shrink-0 text-right"><b className="block font-serif text-[20px] leading-none text-[#9d342e]">#{record.rank}</b><small className="mono mt-1 block text-[8px] text-[#9b8a7c]">{record.score.toFixed(3)}</small></span>
@@ -82,7 +85,9 @@ function ImportanceCard({ record, onOpen }) {
     <p className="mt-3 text-[9px] leading-5 text-[#5f5147]">{record.why}</p>
     <div className="mt-3 flex flex-wrap items-center gap-1.5"><Pill tone="blue">{record.connections} links</Pill><Pill tone="green">{record.supporting_evidence_count} sources</Pill>{record.communities_linked > 1 && <Pill tone="amber">{record.communities_linked} groups</Pill>}{record.is_bridge && <Pill tone="burgundy">Cut point</Pill>}</div>
     <p className="mt-3 border-t border-[#eadfd3] pt-2 text-[8px] leading-4 text-[#94867a]">{record.caveat}</p>
-  </button>;
+    </button>
+    <button onClick={onOpenSource} className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg border border-[#dfd0c0] bg-[#fffaf4] px-2.5 py-1.5 text-[9px] font-bold text-[#8f302b] transition hover:border-[#b36b62] hover:bg-[#fff2ef]"><FileSearch size={11}/>Open in file</button>
+  </div>;
 }
 
 function NetworkCanvas({ nodes, edges, selected, onSelect, height = 520 }) {
@@ -140,7 +145,7 @@ function Drawer({ title, eyebrow, onClose, children, wide = false }) {
 
 function FactRows({ rows }) { return <div className="space-y-2">{rows.map(([label, value]) => <div key={label} className="flex justify-between gap-3 text-[9px]"><span className="text-[#8a7d71]">{label}</span><span className="mono max-w-[290px] break-all text-right font-bold text-[#42342c]">{value}</span></div>)}</div>; }
 
-function RelationDrawer({ relation, caseId, onClose, onReviewed, say }) {
+function RelationDrawer({ relation, caseId, onClose, onReviewed, say, onOpenSource }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   if (!relation) return null;
@@ -162,7 +167,8 @@ function RelationDrawer({ relation, caseId, onClose, onReviewed, say }) {
       ["Time precision", readable(relation.time_precision)],
       ["Confidence", relation.confidence.toFixed(2)],
       ["Verification", readable(relation.verification_status)],
-    ]} /></Card>
+    ]} />
+    <button onClick={() => onOpenSource?.(relation)} className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-[#dfd0c0] bg-[#fffaf4] px-3 py-2 text-[9px] font-bold text-[#8f302b] transition hover:border-[#b36b62] hover:bg-[#fff2ef]"><FileSearch size={12}/>Open this place in the file</button></Card>
     {relation.review_note && <Card className="p-4"><Eyebrow>Reviewer note</Eyebrow><p className="text-[10px] leading-5 text-[#5f5147]">{relation.review_note}</p></Card>}
     <Card className="p-4"><Eyebrow>Record your decision</Eyebrow>
       <textarea value={note} onChange={(event) => setNote(event.target.value)} rows={3} placeholder="Why this relationship is or is not supported by the source." className="w-full rounded-lg border border-[#ded0c0] bg-white px-3 py-2 text-[10px] text-[#42342c] outline-none placeholder:text-[#a99c90] focus:border-[#bd8177]" />
@@ -211,6 +217,8 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
   const [typeFilter, setTypeFilter] = useState("");
   const [selectedNode, setSelectedNode] = useState(null);
   const [openRelation, setOpenRelation] = useState(null);
+  // The panel that shows a statement where it lives in the file it was read from.
+  const [sourceRequest, setSourceRequest] = useState(null);
   const [openEntity, setOpenEntity] = useState(null);
   const [path, setPath] = useState(null);
   const [pathFrom, setPathFrom] = useState("");
@@ -248,6 +256,36 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
     return { nodes: [...nodes.values()], edges };
   }, [data.summary]);
 
+  // One relationship, opened at the cell, line or image region it was read from. The subject's
+  // label goes along as the value to find: a stored image reference covers the whole canvas, so
+  // the value is what lets the server narrow it to the region that actually reads it.
+  const openRelationSource = (relation) => setSourceRequest({
+    caseId,
+    evidenceId: relation.source_evidence_id,
+    target: targetFromReference(relation.source_reference, relation.subject?.label),
+    title: `${relation.subject?.label ?? "?"} ${relation.directed ? "→" : "—"} ${relation.object?.label ?? "?"}`,
+    subtitle: readable(relation.relation_type),
+  });
+
+  // An entity has no reference of its own -- it is a node, not an observation -- so it opens at the
+  // first observation that states something about it. When nothing states anything, there is
+  // nothing to open, and the button is not offered.
+  const relationFor = (entityId) => data.relations.find(
+    (relation) => relation.subject?.id === entityId || relation.object?.id === entityId,
+  );
+
+  const openEntitySource = (entityId, label) => {
+    const relation = relationFor(entityId);
+    if (!relation) { notify.current(`Nothing in this case states a relationship for ${label}, so there is no source to open.`); return; }
+    setSourceRequest({
+      caseId,
+      evidenceId: relation.source_evidence_id,
+      target: targetFromReference(relation.source_reference, label),
+      title: label,
+      subtitle: "Opened at the first evidence that states a relationship for this entity",
+    });
+  };
+
   const relationTypes = useMemo(() => [...new Set(data.summary.map((entry) => entry.relation_type))].sort(), [data.summary]);
   const findPath = async () => { try { setPath(await getNetworkPath(caseId, pathFrom, pathTo)); } catch (error) { notify.current(getApiErrorMessage(error, "The path could not be traced.")); } };
 
@@ -281,7 +319,7 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
     <NetworkCanvas nodes={canvas.nodes} edges={canvas.edges} selected={selectedNode} onSelect={setSelectedNode} />
 
     <div><div className="mb-2 flex items-center gap-2"><Network size={14} className="text-[#8e2d28]" /><Eyebrow>Most important entities / review priority, not guilt</Eyebrow></div>
-      {important.length === 0 ? <Blank title="Nothing ranked yet" detail="Ranking needs at least one stated relationship between two resolved identities." /> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{important.map((record) => <ImportanceCard key={record.entity_id} record={record} onOpen={() => setOpenEntity(record)} />)}</div>}
+      {important.length === 0 ? <Blank title="Nothing ranked yet" detail="Ranking needs at least one stated relationship between two resolved identities." /> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{important.map((record) => <ImportanceCard key={record.entity_id} record={record} onOpen={() => setOpenEntity(record)} onOpenSource={() => openEntitySource(record.entity_id, record.label)} />)}</div>}
     </div>
 
     <div className="grid gap-3 xl:grid-cols-2">
@@ -314,13 +352,14 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
           <td className="mono py-3 text-[8px] text-[#8a7d71]">{sourceLocation(relation.source_reference)}</td>
           <td className="py-3">{relation.confidence.toFixed(2)}</td>
           <td className="py-3"><Pill tone={verificationTone(relation.verification_status)}>{readable(relation.verification_status)}</Pill></td>
-          <td className="py-3 pr-4 text-right"><Button tone="quiet" onClick={() => setOpenRelation(relation)}>Open source</Button></td>
+          <td className="py-3 pr-4 text-right"><Button tone="quiet" onClick={() => setOpenRelation(relation)}>Details</Button><span className="ml-2 inline-block"><Button tone="quiet" onClick={() => openRelationSource(relation)}>Open in file</Button></span></td>
         </tr>)}</tbody>
       </table></div></Card>}
     </div>
 
     <Trace />
-    <RelationDrawer relation={openRelation} caseId={caseId} onClose={() => setOpenRelation(null)} onReviewed={load} say={say} />
+    <RelationDrawer relation={openRelation} caseId={caseId} onClose={() => setOpenRelation(null)} onReviewed={load} say={say} onOpenSource={openRelationSource} />
+    <EvidenceSourceViewer request={sourceRequest} close={() => setSourceRequest(null)} />
     <EntityDrawer entity={openEntity} caseId={caseId} onClose={() => setOpenEntity(null)} say={say} />
   </div>;
 }
