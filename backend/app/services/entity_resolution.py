@@ -285,16 +285,14 @@ INDICATOR_FIELDS: dict[str, str] = {
 def canonicalize_indicator(entity_type: str, value: str) -> ResolvedIdentity | None:
     """Resolve a deterministic-extractor indicator to the same node the grounded pipeline mints.
 
-    Types the resolver has no identity field for (a URL, an IP address) keep their own name and
-    their own conservative normalization; they are still identifiers, just not ones the two
-    pipelines ever disagreed about.
+    Returns None for a type the resolver has no identity field for -- a URL, an IP address, or a
+    legacy `amount` row that was never an identity at all. The caller keeps whatever key such a row
+    already has, because these are types the two pipelines never disagreed about and re-deriving
+    them from the display value only loses information: an amount stored as "59000" came back as
+    "59,000".
 
     Passing a value this module minted returns that same node, so the function is safe to run over
     rows already on record.
     """
     field_name = INDICATOR_FIELDS.get(entity_type)
-    if field_name is not None:
-        return canonicalize(field_name, value)
-
-    folded = patterns.normalize_identifier(entity_type, str(value))
-    return ResolvedIdentity(entity_type, str(value).strip(), folded) if folded.strip() else None
+    return canonicalize(field_name, value) if field_name is not None else None

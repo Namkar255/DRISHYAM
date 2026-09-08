@@ -45,14 +45,20 @@ def _entity_for(db: Session, *, case_id: str, evidence_id: str, indicator: tuple
     grounded pipeline's resolver on both the type name and the canonical key, so the same phone
     number arrived as two rows -- one holding every relationship, the other holding none.
     """
-    entity_type, value, _own_normalization, confidence = indicator
+    entity_type, value, own_normalization, confidence = indicator
     identity = entity_resolution.canonicalize_indicator(entity_type, value)
-    if identity is None:
+    if identity is not None:
+        entity_type, value, normalized_value = identity.entity_type, identity.display_value, identity.canonical_value
+    else:
+        # A type the resolver holds no identity field for, such as a URL. Its own normalization is
+        # the only one there is, and the two pipelines never disagreed about it.
+        normalized_value = own_normalization
+    if not normalized_value:
         return None
-    existing = db.scalar(select(Entity).where(Entity.case_id == case_id, Entity.entity_type == identity.entity_type, Entity.normalized_value == identity.canonical_value))
+    existing = db.scalar(select(Entity).where(Entity.case_id == case_id, Entity.entity_type == entity_type, Entity.normalized_value == normalized_value))
     if existing:
         return existing
-    entity = Entity(case_id=case_id, source_evidence_id=evidence_id, entity_type=identity.entity_type, value=identity.display_value[:512], normalized_value=identity.canonical_value[:512], source_reference=reference[:512], extraction_method="regex_normalizer", confidence=confidence)
+    entity = Entity(case_id=case_id, source_evidence_id=evidence_id, entity_type=entity_type, value=value[:512], normalized_value=normalized_value[:512], source_reference=reference[:512], extraction_method="regex_normalizer", confidence=confidence)
     db.add(entity)
     db.flush()
     return entity

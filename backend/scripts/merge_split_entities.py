@@ -83,6 +83,17 @@ def main() -> int:
                 if args.apply:
                     keeper.entity_type, keeper.normalized_value = key
 
+            # Seeded once per group and carried across losers. The session does not autoflush, so
+            # re-reading the survivor's links for each loser would not show the repoints already
+            # made for the previous one, and three duplicates merging into one survivor would each
+            # claim the same (event, relationship) slot.
+            taken: set[tuple[str, str]] = set()
+            held: set[tuple[str, str]] = set()
+            if args.apply and losers:
+                taken = {tuple(row) for row in session.execute(select(EventEntity.event_id, EventEntity.relationship_type).where(EventEntity.entity_id == keeper.id))}
+                if EntityOccurrence is not None:
+                    held = {tuple(row) for row in session.execute(select(EntityOccurrence.evidence_id, EntityOccurrence.field_name).where(EntityOccurrence.entity_id == keeper.id))}
+
             for loser in losers:
                 print(
                     f"  merge   {loser.id[:8]} ({loser.extraction_method}, {links.get(loser.id, 0)} links)"
@@ -93,7 +104,6 @@ def main() -> int:
                     continue
 
                 # Repoint only what would not collide with a link the survivor already holds.
-                taken = set(session.scalars(select(EventEntity.event_id, EventEntity.relationship_type).where(EventEntity.entity_id == keeper.id)).all())
                 for link in session.scalars(select(EventEntity).where(EventEntity.entity_id == loser.id)):
                     if (link.event_id, link.relationship_type) in taken:
                         session.delete(link)
@@ -102,7 +112,6 @@ def main() -> int:
                         taken.add((link.event_id, link.relationship_type))
 
                 if EntityOccurrence is not None:
-                    held = set(session.scalars(select(EntityOccurrence.evidence_id, EntityOccurrence.field_name).where(EntityOccurrence.entity_id == keeper.id)).all())
                     for occurrence in session.scalars(select(EntityOccurrence).where(EntityOccurrence.entity_id == loser.id)):
                         if (occurrence.evidence_id, occurrence.field_name) in held:
                             session.delete(occurrence)
