@@ -243,6 +243,9 @@ def important_entities(
                 "rank": len(ranked) + 1,
                 "connections": len(neighbours),
                 "supporting_evidence_count": len(evidence),
+                # The count was collected and the ids thrown away, so a ranking that said it was
+                # "supported by 3 evidence files" gave a reader no way to open any of them.
+                "supporting_evidence_ids": sorted(evidence),
                 "communities_linked": len({communities[other] for other in neighbours if other in communities}),
                 "is_bridge": node in cut_nodes,
                 "why": _explain(graph, node, metric=metric, score=float(score), communities=communities, is_bridge=node in cut_nodes),

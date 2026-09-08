@@ -165,7 +165,10 @@ def _bridge_entity(db: Session, case_id: str) -> int:
                 "Verify the relationships through it first: if one of them is wrong, the connection between "
                 "those groups does not exist. Network position is review priority, not an indication of guilt."
             ),
-            evidence_ids=[],
+            # The lead says how many evidence files support this position, so it must name them.
+            # Raised with an empty list, it told a reviewer to verify relationships it gave them no
+            # way to open.
+            evidence_ids=list(entry.get("supporting_evidence_ids") or []),
         )
     return raised
 
