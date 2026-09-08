@@ -56,6 +56,24 @@ class OCRBlock:
         }
 
 
+def _reads_better(candidate: "OCRResult", baseline: "OCRResult") -> bool:
+    """Whether a prepared image gave a genuinely better reading than the untouched one.
+
+    Confidence alone is not enough: an image that yields two very confident fragments has not been
+    read better than one that yields the whole page slightly less confidently. Recovered characters
+    are weighed alongside the engine's own confidence.
+    """
+    candidate_text = len(candidate.text.strip())
+    baseline_text = len(baseline.text.strip())
+    if candidate_text == 0:
+        return False
+    if baseline_text == 0:
+        return True
+    confidence_gain = (candidate.mean_confidence or 0) - (baseline.mean_confidence or 0)
+    text_gain = (candidate_text - baseline_text) / baseline_text
+    return text_gain > 0.05 or (text_gain >= -0.02 and confidence_gain > 3.0)
+
+
 @dataclass
 class OCRResult:
     blocks: list[OCRBlock] = field(default_factory=list)
@@ -64,6 +82,10 @@ class OCRResult:
     mean_confidence: float | None = None
     engine: str = OCR_ADAPTER_VERSION
     quality_flags: list[str] = field(default_factory=list)
+    # What the image was like, and what was done to it before reading. Recorded so a reviewer
+    # judging a poor reading can see whether the source or the reader was the problem.
+    quality_report: dict[str, Any] = field(default_factory=dict)
+    preprocessing_applied: list[str] = field(default_factory=list)
 
     @property
     def text(self) -> str:
@@ -76,6 +98,8 @@ class OCRResult:
             "height": self.height,
             "mean_confidence": round(self.mean_confidence, 2) if self.mean_confidence is not None else None,
             "quality_flags": self.quality_flags,
+            "quality_report": self.quality_report,
+            "preprocessing_applied": self.preprocessing_applied,
             "blocks": [block.to_dict() for block in self.blocks],
         }
 
@@ -99,7 +123,25 @@ class TesseractOCRAdapter:
             return self.read_image(image, page=page)
 
     def read_image(self, image: Any, *, page: int = 1) -> OCRResult:
+        from app.evidence_intelligence import preprocessing
+
+        prepared, report, applied = preprocessing.prepared_for_reading(image)
         result = self._read_once(image, page=page)
+
+        if applied:
+            # Preparation is only kept when it actually reads better. Sharpening a page that was
+            # already legible can lose thin strokes, so the untouched reading stays the default and
+            # has to be beaten on confidence, not merely replaced.
+            enhanced = self._read_once(prepared, page=page)
+            if _reads_better(enhanced, result):
+                result, applied = enhanced, applied
+            else:
+                applied = []
+        result.quality_report = report.to_dict()
+        result.preprocessing_applied = applied
+        for flag in report.flags:
+            if flag not in result.quality_flags:
+                result.quality_flags.append(flag)
 
         # A chat header is light text on a dark bar, which Tesseract reads poorly. When the header
         # band comes back empty, retry just that strip inverted rather than reporting a missing
