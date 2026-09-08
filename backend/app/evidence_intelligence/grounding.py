@@ -15,6 +15,7 @@ from typing import Any
 from app.evidence_intelligence.extraction import AUTHORITATIVE_FIELDS, ExtractionUnit, RawExtraction
 from app.evidence_intelligence.ocr import OCRResult
 from app.evidence_intelligence.schema import (
+    Readability,
     FieldProvenance,
     ObservationBasis,
     ValidationStatus,
@@ -64,6 +65,22 @@ def _substantially_from_source(observed: str, haystack: str) -> bool:
         return False
     found = sum(1 for word in words if word in haystack)
     return found / len(words) >= OBSERVED_TEXT_COVERAGE
+
+
+def _readability(claim: dict) -> Readability:
+    """What the model said it could actually read, defaulting to not-applicable.
+
+    Only a value the model explicitly marks is treated as a readability judgement. An absent field
+    means the question did not arise -- typed text in a CSV is neither readable nor unreadable in
+    this sense -- and must not be recorded as though the model had assessed it.
+    """
+    stated = claim.get("readability")
+    if isinstance(stated, str):
+        try:
+            return Readability(stated)
+        except ValueError:
+            return Readability.NOT_APPLICABLE
+    return Readability.NOT_APPLICABLE
 
 
 @dataclass
@@ -195,6 +212,13 @@ def validate(
                     basis=ObservationBasis.UNKNOWN,
                     reason=str(claim.get("reason") or "The source does not establish this field."),
                     validation_status=ValidationStatus.UNVALIDATED,
+                    readability=_readability(claim),
+                    # A partially readable value keeps its visible characters here even though the
+                    # value itself stays null. The fragment is what was observed; completing it
+                    # would be the invention this whole layer exists to refuse.
+                    literal_transcription=(
+                        str(claim["literal_transcription"]) if isinstance(claim.get("literal_transcription"), str) else None
+                    ),
                 ),
             )
             continue
@@ -241,6 +265,10 @@ def validate(
             confidence=float(confidence) if isinstance(confidence, (int, float)) and 0.0 <= float(confidence) <= 1.0 else None,
             validation_status=status,
             reason=str(claim["reason"]) if isinstance(claim.get("reason"), str) else None,
+            readability=_readability(claim),
+            literal_transcription=(
+                str(claim["literal_transcription"]) if isinstance(claim.get("literal_transcription"), str) else None
+            ),
         )
 
     for list_field in ("phone_numbers", "email_addresses", "account_identifiers"):

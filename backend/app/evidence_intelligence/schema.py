@@ -37,6 +37,20 @@ class ConfidenceBand(str, Enum):
     UNKNOWN = "unknown"
 
 
+class Readability(str, Enum):
+    """How much of a written value could actually be read.
+
+    `PARTIALLY_READABLE` is the one that matters. A half-read phone number must keep its visible
+    fragment and must never be completed into a whole number -- the fragment is an observation, the
+    completion would be an invention.
+    """
+
+    READABLE = "readable"
+    PARTIALLY_READABLE = "partially_readable"
+    UNREADABLE = "unreadable"
+    NOT_APPLICABLE = "not_applicable"
+
+
 class MessageDirection(str, Enum):
     INCOMING = "incoming"
     OUTGOING = "outgoing"
@@ -87,6 +101,11 @@ class FieldProvenance(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     validation_status: ValidationStatus = ValidationStatus.UNVALIDATED
     reason: str | None = None
+    # For handwritten and degraded sources: what was legible, and the characters as printed before
+    # any normalisation. A partially readable value keeps `literal_transcription` and leaves
+    # `value` null rather than guessing the rest.
+    readability: Readability = Readability.NOT_APPLICABLE
+    literal_transcription: str | None = None
 
     @classmethod
     def observed(cls, value: Any, *, quote: str, reference: SourceReference, confidence: float) -> FieldProvenance:

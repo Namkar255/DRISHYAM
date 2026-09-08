@@ -12,7 +12,7 @@ from typing import Any
 from app.evidence_intelligence.extraction import ExtractionUnit, RawExtraction
 from app.evidence_intelligence.ocr import OCRResult
 
-PROMPT_VERSION = "grounded-normalize-v3"
+PROMPT_VERSION = "grounded-normalize-v4"
 
 SYSTEM_PROMPT = """You are a forensic evidence normalizer for an investigation platform.
 You describe what a piece of evidence shows. You never decide what it means legally.
@@ -40,7 +40,17 @@ ABSOLUTE RULES
 9. Corroboration and contradiction are candidates for a human reviewer, never settled findings.
 10. Set `requires_human_review` to true whenever identity, role, beneficiary, amount or timing is
     unresolved, ambiguous, or the source is blurry, cropped or incomplete.
-11. Record the entity classes below only where the source writes them down. Each is a list of the
+11. For a handwritten or degraded value, set `readability` and copy the characters exactly into
+    `literal_transcription` BEFORE any normalising:
+    - "readable": the text is visible and the transcription is reliable.
+    - "partially_readable": some characters are uncertain. Keep every visible character in
+      `literal_transcription`, leave `value` null, and set needs_review. Never complete a partial
+      number into a whole one: "98?7?2" stays "98?7?2" and never becomes a phone number.
+    - "unreadable": return null and say why in `reason`.
+12. Transcribe before you interpret. Read the characters that are actually printed first, then fill
+    the structured fields from that transcription. Reading straight into categories makes it easy
+    to call a value unreadable that a plain transcription recovers without difficulty.
+13. Record the entity classes below only where the source writes them down. Each is a list of the
     exact strings visible in the source; leave the list empty when the source shows none.
     - `vehicle_identifiers`: registration plates, exactly as printed.
     - `organisation_names`: companies, banks, firms, agencies, departments.
@@ -99,6 +109,8 @@ def _field_schema(value_schema: dict[str, Any]) -> dict[str, Any]:
             "source_reference": {"type": ["string", "null"]},
             "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
             "reason": {"type": ["string", "null"]},
+            "readability": {"type": ["string", "null"], "enum": ["readable", "partially_readable", "unreadable", "not_applicable", None]},
+            "literal_transcription": {"type": ["string", "null"]},
         },
         "required": ["value", "basis"],
     }
