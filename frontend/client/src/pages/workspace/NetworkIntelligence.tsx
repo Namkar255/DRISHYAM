@@ -329,6 +329,10 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
     <NetworkCanvas nodes={canvas.nodes} edges={canvas.edges} selected={selectedNode} onSelect={selectNode} />
 
     <div><div className="mb-2 flex items-center gap-2"><Network size={14} className="text-[#8e2d28]" /><Eyebrow>Most important entities / review priority, not guilt</Eyebrow></div>
+      {/* The three rankings often agree on who is first and differ only in the score beneath it, and
+          a confidence floor can drop half the entities without changing the top card. Saying what is
+          on screen is how a reader sees that a control did anything at all. */}
+      <p className="mb-3 text-[9px] leading-4 text-[#8a7d71]">Ranked by <b className="text-[#6b5b51]">{readable(metric.replace("_centrality", ""))}</b> · showing <b className="text-[#6b5b51]">{important.length}</b> {important.length === 1 ? "entity" : "entities"}{minConfidence > 0 ? <> whose relationships are at least <b className="text-[#6b5b51]">{minConfidence.toFixed(1)}</b> confident</> : " at every confidence"}.</p>
       {important.length === 0 ? <Blank title="Nothing ranked yet" detail="Ranking needs at least one stated relationship between two resolved identities." /> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{important.map((record) => <ImportanceCard key={record.entity_id} record={record} onOpen={() => setOpenEntity(record)} onOpenSource={() => openEntitySource(record.entity_id, record.label)} />)}</div>}
     </div>
 
