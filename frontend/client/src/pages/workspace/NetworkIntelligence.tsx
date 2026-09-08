@@ -286,6 +286,16 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
     });
   };
 
+  // Clicking a node does both things a reader wants at once: it dims the rest of the map to what
+  // this entity touches, and it opens the evidence that put the entity on the map at all. Clicking
+  // the selected node again clears both.
+  const selectNode = (nodeId) => {
+    if (!nodeId || nodeId === selectedNode) { setSelectedNode(null); setSourceRequest(null); return; }
+    setSelectedNode(nodeId);
+    const node = canvas.nodes.find((item) => item.id === nodeId);
+    openEntitySource(nodeId, node?.label ?? "This entity");
+  };
+
   const relationTypes = useMemo(() => [...new Set(data.summary.map((entry) => entry.relation_type))].sort(), [data.summary]);
   const findPath = async () => { try { setPath(await getNetworkPath(caseId, pathFrom, pathTo)); } catch (error) { notify.current(getApiErrorMessage(error, "The path could not be traced.")); } };
 
@@ -316,7 +326,7 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
       {[0, 0.5, 0.8].map((value) => <Chip key={value} active={minConfidence === value} onClick={() => setMinConfidence(value)}>{value === 0 ? "All" : value.toFixed(1)}</Chip>)}
     </div>
 
-    <NetworkCanvas nodes={canvas.nodes} edges={canvas.edges} selected={selectedNode} onSelect={setSelectedNode} />
+    <NetworkCanvas nodes={canvas.nodes} edges={canvas.edges} selected={selectedNode} onSelect={selectNode} />
 
     <div><div className="mb-2 flex items-center gap-2"><Network size={14} className="text-[#8e2d28]" /><Eyebrow>Most important entities / review priority, not guilt</Eyebrow></div>
       {important.length === 0 ? <Blank title="Nothing ranked yet" detail="Ranking needs at least one stated relationship between two resolved identities." /> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{important.map((record) => <ImportanceCard key={record.entity_id} record={record} onOpen={() => setOpenEntity(record)} onOpenSource={() => openEntitySource(record.entity_id, record.label)} />)}</div>}
