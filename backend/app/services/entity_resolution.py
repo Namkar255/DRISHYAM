@@ -72,6 +72,16 @@ def _classify_account(value: str) -> str:
     return "account"
 
 
+# A personal name is a short run of alphabetic words. This does not decide whether the name is
+# real, or whose it is -- only whether the string is shaped like one at all.
+_MAX_NAME_WORDS = 4
+
+
+def _reads_as_a_name(folded: str) -> bool:
+    words = folded.split()
+    return 1 <= len(words) <= _MAX_NAME_WORDS and all(word.isalpha() and len(word) > 1 for word in words)
+
+
 def canonicalize(field_name: str, raw: str) -> ResolvedIdentity | None:
     """Reduce one observed value to the node it belongs to, or None if it identifies nothing."""
     value = str(raw).strip()
@@ -138,9 +148,16 @@ def canonicalize(field_name: str, raw: str) -> ResolvedIdentity | None:
             resolved = _classify_account(value)
             return ResolvedIdentity(resolved, value, value.casefold())
         folded = patterns.normalize_person(value)
+        if len(folded) < 3:
+            return None
         # Still a name read off a document, and a name is not proof of identity. `person` carries
         # that caveat already; the confidence this is stored with says the rest.
-        return ResolvedIdentity("person", value, folded) if len(folded) >= 3 else None
+        #
+        # But only where the value reads as a name at all. A sender column in real mail and ledger
+        # data carries things like "withdrawal approval pending inbox ww" and "synthetic account
+        # 8233", and calling those people states something the source does not. They stay `party`:
+        # a stated counterparty of unknown kind, which is exactly what they are.
+        return ResolvedIdentity("person" if _reads_as_a_name(folded) else "party", value, folded)
 
     return None
 
