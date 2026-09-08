@@ -54,6 +54,14 @@ class SourceType(str, Enum):
     IMAGE = "image"
     DOCUMENT = "document"
     SPREADSHEET = "spreadsheet"
+    # The sources SIH26189 names. They parse like a table or a document, but naming them lets the
+    # extractor read the structure each one actually has -- an A-party and B-party column in a CDR,
+    # a report header and stated roles in an FIR or a surveillance note.
+    CDR = "cdr"
+    FIR = "fir"
+    POLICE_REPORT = "police_report"
+    SURVEILLANCE = "surveillance"
+    SOCIAL_MEDIA = "social_media"
     UNKNOWN = "unknown"
 
 

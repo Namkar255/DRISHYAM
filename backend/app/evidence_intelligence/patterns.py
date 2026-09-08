@@ -497,6 +497,18 @@ PERSON_LABEL_PATTERN = re.compile(
 PERSON_RELATION_PATTERN = re.compile(
     r"\b[SDWsdw]\s?/\s?[Oo]\.?\s*(?P<name>[A-Z][A-Za-z.]{1,20}(?:\s+[A-Z][A-Za-z.]{1,20}){0,3})"
 )
+# A report header writes "Accused: Suresh Yadav"; the narrative below it writes "accused Suresh
+# Yadav was driving". The role is stated either way, and reading only the header form meant every
+# name in the body of an FIR was invisible. The name must still be capitalised, so "the accused was
+# seen" ends at "was" and yields nothing.
+# The role word may be capitalised or not; the name may not. re.IGNORECASE cannot express that --
+# it would also relax [A-Z] on the name and let "states that accused Suresh" through as a person,
+# which is exactly what it did. The role alternatives therefore carry their own case classes.
+PERSON_INLINE_ROLE_PATTERN = re.compile(
+    r"\b(?:[Aa]ccused|[Cc]omplainant|[Vv]ictim|[Ii]nformant|[Ww]itness|[Ss]uspect|[Dd]eceased"
+    r"|[Pp]etitioner|[Rr]espondent|[Dd]river|[Oo]wner)\s+"
+    r"(?P<name>[A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,3})"
+)
 
 
 def normalize_person(value: str) -> str:
@@ -506,7 +518,7 @@ def normalize_person(value: str) -> str:
 def find_person_names(text: str) -> list[str]:
     """Names the source attaches to a stated role. Never inferred from capitalisation."""
     found: set[str] = set()
-    for pattern in (PERSON_LABEL_PATTERN, PERSON_RELATION_PATTERN):
+    for pattern in (PERSON_LABEL_PATTERN, PERSON_RELATION_PATTERN, PERSON_INLINE_ROLE_PATTERN):
         for match in pattern.finditer(text):
             name = " ".join(match.group("name").split()).strip(" .")
             # A label followed by an email or phone is an identifier, not a name.
@@ -515,3 +527,101 @@ def find_person_names(text: str) -> list[str]:
             if len(normalize_person(name)) >= 3:
                 found.add(name)
     return sorted(found)
+
+
+# ---------------------------------------------------------------------------
+# Police report structure (SIH26189 source #1)
+#
+# An FIR states its own metadata in a header before the narrative begins. These
+# read only what the form prints; nothing is inferred from the body text.
+# ---------------------------------------------------------------------------
+
+FIR_NUMBER_PATTERN = re.compile(r"\bF\.?\s?I\.?\s?R\.?\s*(?:No\.?|Number)?\s*[:\-]?\s*(?P<value>\d{1,5}\s*/\s*\d{2,4})", re.IGNORECASE)
+# "u/s 420 IPC", "under sections 66C, 66D IT Act"
+FIR_SECTIONS_PATTERN = re.compile(
+    r"\b(?:u/?s|under\s+sections?|sections?)\s*[:\-]?\s*(?P<value>\d{1,4}[A-Z]?(?:\s*(?:,|and|&|/)\s*\d{1,4}[A-Z]?)*)"
+    r"(?:\s*(?:of\s+)?(?P<act>IPC|I\.P\.C\.|IT\s+Act|CrPC|BNS|BNSS|NDPS(?:\s+Act)?))?",
+    re.IGNORECASE,
+)
+# The station name must stay on the label's own line. Using `\s` between the words let the match
+# run past the newline and swallow the first word of the line below ("Andheri East Offence").
+FIR_STATION_PATTERN = re.compile(
+    r"\b(?:Police[^\S\n]+Station|P\.?[^\S\n]?S\.?|Thana)[^\S\n]*[:\-][^\S\n]*"
+    r"(?P<value>[A-Z][A-Za-z]{1,24}(?:[^\S\n]+[A-Z][A-Za-z]{1,24}){0,3})"
+)
+
+
+def find_fir_number(text: str) -> str | None:
+    match = FIR_NUMBER_PATTERN.search(text)
+    return re.sub(r"\s+", "", match.group("value")) if match else None
+
+
+def find_fir_sections(text: str) -> list[str]:
+    """Sections invoked, each kept with the act when the source names one."""
+    found: list[str] = []
+    for match in FIR_SECTIONS_PATTERN.finditer(text):
+        act = re.sub(r"\s+", " ", (match.group("act") or "")).strip().upper().replace(".", "")
+        for section in re.split(r"\s*(?:,|and|&|/)\s*", match.group("value")):
+            section = section.strip().upper()
+            if not section:
+                continue
+            label = f"{section} {act}".strip()
+            if label not in found:
+                found.append(label)
+    return found
+
+
+def find_police_station(text: str) -> str | None:
+    match = FIR_STATION_PATTERN.search(text)
+    return " ".join(match.group("value").split()) if match else None
+
+
+# ---------------------------------------------------------------------------
+# Stated roles inside one sentence
+#
+# A relationship between a person and a vehicle or a place is only read where
+# the source writes the verb. "Ravi Kumar was driving MH12DE1433" states one;
+# "Ravi Kumar ... MH12DE1433" somewhere on the same page states nothing, and
+# reading it as a relationship is the invention this project exists to refuse.
+# The match must also stay inside a single sentence -- a subject in one sentence
+# and a plate in the next are two separate facts.
+# ---------------------------------------------------------------------------
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+
+# was driving / drove / riding / travelling in / on board
+_DRIVING_VERB = r"(?:driv\w*|rid\w*|travell?\w*\s+in|aboard|on\s+board|using|used)"
+# seen at / present at / residing at / located at / arrested at
+_PRESENCE_VERB = r"(?:seen|spotted|present|residing|resident|living|located|found|arrested|apprehended|met)"
+
+
+def sentences(text: str) -> list[str]:
+    return [part.strip() for part in _SENTENCE_SPLIT.split(text or "") if part.strip()]
+
+
+def find_person_vehicle_links(text: str) -> list[tuple[str, str, str]]:
+    """(person, vehicle, quoted sentence) where one sentence states the person used the vehicle."""
+    links: list[tuple[str, str, str]] = []
+    for sentence in sentences(text):
+        vehicles = find_vehicle_identifiers(sentence)
+        if not vehicles or not re.search(_DRIVING_VERB, sentence, re.IGNORECASE):
+            continue
+        for person in find_person_names(sentence):
+            for vehicle in vehicles:
+                if (person, vehicle) not in {(item[0], item[1]) for item in links}:
+                    links.append((person, vehicle, sentence))
+    return links
+
+
+def find_person_location_links(text: str) -> list[tuple[str, str, str]]:
+    """(person, place, quoted sentence) where one sentence places the person somewhere."""
+    links: list[tuple[str, str, str]] = []
+    for sentence in sentences(text):
+        places = find_locations(sentence)
+        if not places or not re.search(_PRESENCE_VERB, sentence, re.IGNORECASE):
+            continue
+        for person in find_person_names(sentence):
+            for place in places:
+                if (person, place) not in {(item[0], item[1]) for item in links}:
+                    links.append((person, place, sentence))
+    return links
