@@ -126,13 +126,21 @@ def canonicalize(field_name: str, raw: str) -> ResolvedIdentity | None:
         return ResolvedIdentity("location", value, folded) if len(folded) >= 3 else None
 
     if kind == "party":
-        if patterns.EMAIL_PATTERN.fullmatch(value):
-            return ResolvedIdentity("email", value, value.casefold())
+        # A stated sender or receiver is whatever it turns out to be. Reading it as an opaque
+        # "party" put the complainant named in an FIR and the same complainant named in the payer
+        # column of a statement into two nodes, and a UPI handle in a receiver column into a second
+        # node beside the one the handle already had. Both halves were weak in exactly the same
+        # way, so the split bought nothing and cost the link.
         digits = re.sub(r"\D", "", value)
         if len(digits) >= 10:
             return ResolvedIdentity("phone", patterns.normalize_phone(value), digits[-10:])
-        folded = _NON_ALNUM.sub(" ", value.casefold()).strip()
-        return ResolvedIdentity("party", value, folded) if len(folded) >= 3 else None
+        if "@" in value:
+            resolved = _classify_account(value)
+            return ResolvedIdentity(resolved, value, value.casefold())
+        folded = patterns.normalize_person(value)
+        # Still a name read off a document, and a name is not proof of identity. `person` carries
+        # that caveat already; the confidence this is stored with says the rest.
+        return ResolvedIdentity("person", value, folded) if len(folded) >= 3 else None
 
     return None
 
