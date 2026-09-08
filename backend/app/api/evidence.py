@@ -3,7 +3,7 @@
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 
@@ -12,6 +12,7 @@ from app.models.entities import EvidenceFile, EvidenceStatus
 from app.schemas.evidence import EvidenceReceiptResponse, EvidenceResponse
 from app.services.audit import audit
 from app.services.cases import require_case_access
+from app.services import source_view
 from app.services.storage import delete_private_object, get_private_path, persist_upload, source_category
 from app.workers.tasks import process_evidence_task
 
@@ -65,6 +66,59 @@ def download_original(case_id: str, evidence_id: str, current_user: CurrentUser,
     audit(db, action="evidence.download_original", object_type="evidence_file", object_id=evidence.id, case_id=case_id, outcome="success", actor_id=current_user.id)
     db.commit()
     return FileResponse(get_private_path(evidence.storage_key), media_type=evidence.detected_mime, filename=evidence.original_name)
+
+
+@router.get("/{evidence_id}/source-view")
+def read_source_view(
+    case_id: str,
+    evidence_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+    value: str | None = Query(None, max_length=320, description="The value to find, when the reference alone does not place it."),
+    row: int | None = Query(None, ge=1),
+    column: str | None = Query(None, max_length=160),
+    page: int | None = Query(None, ge=1),
+    line_start: int | None = Query(None, ge=1),
+    line_end: int | None = Query(None, ge=1),
+    block_id: str | None = Query(None, max_length=64),
+) -> dict:
+    """Show one evidence file with the place a stored reference points at marked on it.
+
+    The parameters are the fields of a source reference as it is already stored on a relationship,
+    an entity occurrence or an assistant finding, so a caller passes back what it was given rather
+    than deriving anything of its own.
+
+    Reading a file's contents is a disclosure of evidence and is recorded as one. The response
+    reports whether the place was actually found: a viewer must be able to say "this is the source,
+    but the exact spot could not be located" instead of marking somewhere plausible.
+    """
+    require_case_access(db, case_id, current_user)
+    evidence = db.scalar(select(EvidenceFile).where(EvidenceFile.id == evidence_id, EvidenceFile.case_id == case_id))
+    if not evidence:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence record not found")
+
+    target = source_view.Target(
+        value=value,
+        row=row,
+        column=column,
+        page=page,
+        line_start=line_start,
+        line_end=line_end,
+        block_id=block_id,
+    )
+    view = source_view.build(db, evidence, target=target)
+    audit(
+        db,
+        action="evidence.source_view",
+        object_type="evidence_file",
+        object_id=evidence.id,
+        case_id=case_id,
+        outcome="success",
+        actor_id=current_user.id,
+        details={"kind": view.kind, "located": view.located},
+    )
+    db.commit()
+    return view.to_dict()
 
 
 @router.post("/{evidence_id}/process", response_model=EvidenceResponse)
