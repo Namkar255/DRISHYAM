@@ -21,7 +21,7 @@ from app.evidence_intelligence import correlation
 from app.evidence_intelligence.detection import ContentFileTypeDetector
 from app.evidence_intelligence.extraction import DeterministicExtractor, RawExtraction
 from app.evidence_intelligence.ocr import OCRResult
-from app.evidence_intelligence.providers.router import ModelRouter, RoutingOutcome
+from app.evidence_intelligence.providers.router import CachedResponse, ModelRouter, RoutingOutcome
 from app.evidence_intelligence.schema import (
     RAW_EXTRACTION_VERSION,
     NormalizedRecordDraft,
@@ -303,7 +303,23 @@ def run_grounded_pipeline(db: Session, evidence: EvidenceFile, *, force_escalati
 
     ocr_result = _ocr_result_from(extraction)
     image_path = path if detected.source_type in VISUAL_TYPES else None
-    router = ModelRouter()
+    def _cached_answer(cache_key: str) -> CachedResponse | None:
+        """A prior answer to an identical request, from any earlier run.
+
+        The key already covers the evidence hash, parser version, provider, model, prompt version
+        and the image bytes, so a hit means the exact same question was asked and answered. On a
+        local vision model this turns a reprocess from tens of seconds per image into nothing.
+        """
+        prior = db.scalar(
+            select(ModelInferenceRun)
+            .where(ModelInferenceRun.cache_key == cache_key, ModelInferenceRun.status == "succeeded")
+            .order_by(ModelInferenceRun.created_at.desc())
+        )
+        if prior is None or prior.parsed_payload is None:
+            return None
+        return CachedResponse(raw_output=prior.raw_output, payload=prior.parsed_payload)
+
+    router = ModelRouter(cache_lookup=_cached_answer)
 
     # The model pass is the long part — minutes on a local vision model — and until now nothing
     # recorded that it had started. The processing view therefore showed every stage succeeded and

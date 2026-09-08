@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.core.config import get_settings
 from app.evidence_intelligence import confidence as confidence_engine
@@ -105,6 +105,14 @@ class InferenceAttempt:
 
 
 @dataclass
+class CachedResponse:
+    """A model answer already on record for an identical request."""
+
+    raw_output: str | None
+    payload: dict[str, Any] | None
+
+
+@dataclass
 class RoutingOutcome:
     record: NormalizedRecordDraft
     attempts: list[InferenceAttempt] = field(default_factory=list)
@@ -176,7 +184,16 @@ class ModelRouter:
 
     version = ROUTER_VERSION
 
-    def __init__(self, local: VLMAdapter | None = _UNSET, escalation: VLMAdapter | None = _UNSET) -> None:
+    def __init__(
+        self,
+        local: VLMAdapter | None = _UNSET,
+        escalation: VLMAdapter | None = _UNSET,
+        cache_lookup: Callable[[str], CachedResponse | None] | None = None,
+    ) -> None:
+        # Injected rather than looked up here: this layer must not know a database exists. The
+        # caller that owns a session supplies the reader; without one the router simply always
+        # calls the provider, which is the previous behaviour.
+        self._cache_lookup = cache_lookup or (lambda _key: None)
         # `_UNSET` means "build from configuration"; an explicit None means "no provider on this
         # leg", which is how tests and the deterministic-only path disable a model.
         self._local = local
@@ -310,6 +327,18 @@ class ModelRouter:
         if tripped := self._unreachable.get(adapter.name):
             attempt.status = "failed"
             attempt.error = tripped
+            return attempt
+
+        if (cached := self._cache_lookup(cache_key)) is not None:
+            # The key already covered evidence hash, parser version, provider, model, prompt version
+            # and the images, and its docstring promised identical work would never be paid for
+            # twice. Only the audit row was deduplicated, though -- the model was still called on
+            # every reprocess, which on a local vision model is tens of seconds per image for an
+            # answer already known.
+            attempt.status = "cached"
+            attempt.raw_output = cached.raw_output
+            attempt.payload = cached.payload
+            attempt.latency_ms = 0
             return attempt
 
         try:
