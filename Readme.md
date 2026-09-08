@@ -45,9 +45,9 @@ These capabilities are required by SIH26189 and are being added on the existing 
 | Capability | Status |
 |---|---|
 | Person, vehicle, location and organisation extraction | **Done** — alongside phone, email, UPI, account, IFSC and reference identifiers. Each resolves to a weighted graph node with its own uncertainty caveat |
-| Typed entity-to-entity relationships with provenance | **Done** — `TRANSFERRED_TO`, `REQUESTED_PAYMENT_FROM`, `MESSAGED`, `COMMUNICATED_WITH`, `ASSOCIATED_WITH`, `MENTIONED_WITH`. Every edge carries the evidence and source region it was read from. `USED_VEHICLE` and `LOCATED_AT` wait for the FIR and surveillance adapters, which is what would establish them |
+| Typed entity-to-entity relationships with provenance | **Done** — `TRANSFERRED_TO`, `REQUESTED_PAYMENT_FROM`, `CALLED`, `USED_VEHICLE`, `LOCATED_AT`, `MESSAGED`, `COMMUNICATED_WITH`, `ASSOCIATED_WITH`, `MENTIONED_WITH`. Every edge carries the evidence and source region it was read from, and direction is asserted only where the source states who acted on whom |
 | Network analytics: centrality, bridge detection, communities | **Done** — betweenness/degree/eigenvector, Louvain communities, bridges, weighted shortest paths and hop-limited subgraphs. Every ranked entity carries a countable explanation and a caveat; a bare score is never returned |
-| CDR and FIR source adapters | Planned — generic CSV, PDF, image and email parsing already works |
+| CDR and FIR source adapters | **Done** — a CDR's A-party/B-party columns give a directed `CALLED`; an FIR or surveillance note yields its header (FIR number, sections, station) and the roles its sentences state. Social-media export remains planned |
 | Temporal analytics and incident-window pattern rules | Planned — five explainable alert rules already run |
 | Network Intelligence workspace view | **Done** — relationship map, ranked entities with explanations, bridges, groups, path tracing, and a relationship table whose every row opens at the row, page or image region it was read from |
 | Entity Profile and Relationship Detail drill-down | **Done** — entity neighbourhoods load one hop at a time; relationship review is recorded from the drawer |
