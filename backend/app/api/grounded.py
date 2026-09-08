@@ -31,6 +31,7 @@ from app.schemas.grounded import (
     EntityRelationPage,
     EntityRelationReviewRequest,
     EntityRelationSummary,
+    CaseChronologyResponse,
     EvidenceStagesResponse,
     ImportantEntityResponse,
     ModelRunResponse,
@@ -43,6 +44,7 @@ from app.schemas.grounded import (
     NormalizedRecordResponse,
     ProcessingStageResponse,
     RawArtifactResponse,
+    TemporalFindingResponse,
     RecordReviewRequest,
     RecordReviewResponse,
     RelationPage,
@@ -53,7 +55,7 @@ from app.schemas.grounded import (
 )
 from app.core.security import utcnow
 from app.graph import analytics
-from app.services import record_review, relationship_builder
+from app.services import record_review, relationship_builder, temporal
 from app.services.audit import audit
 from app.services.cases import require_case_access
 from app.services.grounded_pipeline import GROUNDED_PIPELINE_VERSION, UI_STAGE_ORDER
@@ -654,3 +656,59 @@ def network_subgraph(
     """One entity's neighbourhood. The browser expands outward rather than loading a whole case."""
     require_case_access(db, case_id, current_user)
     return NetworkSubgraphResponse(**analytics.subgraph(db, case_id, entity_id, hops=hops, min_confidence=min_confidence))
+
+
+# --------------------------------------------------------------------------- temporal
+
+
+def _temporal_finding(entry: dict, entities: dict[str, Entity], detail: str) -> TemporalFindingResponse:
+    left, right = entry["pair"]
+    return TemporalFindingResponse(
+        subject=_entity_endpoint(entities.get(left), left),
+        object=_entity_endpoint(entities.get(right), right),
+        contacts=entry["contacts"],
+        first=entry["first"],
+        last=entry["last"],
+        evidence_ids=entry["evidence_ids"],
+        relation_ids=entry["relation_ids"],
+        detail=detail,
+        minutes=entry.get("minutes"),
+        hours_before=entry.get("hours_before"),
+    )
+
+
+@router.get("/temporal/chronology", response_model=CaseChronologyResponse)
+def case_chronology(case_id: str, current_user: CurrentUser, db: DbSession) -> CaseChronologyResponse:
+    """Contact placed before, during and after the declared incident window.
+
+    A case with no declared window says so rather than inventing one, and contact whose time was
+    never established is reported rather than quietly folded into a bucket.
+    """
+    require_case_access(db, case_id, current_user)
+    return CaseChronologyResponse(**temporal.case_chronology(db, case_id))
+
+
+@router.get("/temporal/pre-incident", response_model=list[TemporalFindingResponse])
+def pre_incident_contacts(case_id: str, current_user: CurrentUser, db: DbSession) -> list[TemporalFindingResponse]:
+    """Pairs repeatedly in contact in the hours before the incident window opens."""
+    require_case_access(db, case_id, current_user)
+    entities = {item.id: item for item in db.scalars(select(Entity).where(Entity.case_id == case_id)).all()}
+    return [
+        _temporal_finding(
+            entry,
+            entities,
+            f"{entry['contacts']} contacts, the last {entry['hours_before']} hours before the incident window opens.",
+        )
+        for entry in temporal.pre_incident_contacts(db, case_id)
+    ]
+
+
+@router.get("/temporal/bursts", response_model=list[TemporalFindingResponse])
+def communication_bursts(case_id: str, current_user: CurrentUser, db: DbSession) -> list[TemporalFindingResponse]:
+    """Contact between one pair repeated inside a short span."""
+    require_case_access(db, case_id, current_user)
+    entities = {item.id: item for item in db.scalars(select(Entity).where(Entity.case_id == case_id)).all()}
+    return [
+        _temporal_finding(entry, entities, f"{entry['contacts']} contacts within {entry['minutes']} minutes.")
+        for entry in temporal.communication_bursts(db, case_id)
+    ]

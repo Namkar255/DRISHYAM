@@ -312,3 +312,29 @@ class NetworkOverviewResponse(BaseModel):
     bridges: int
     isolated_entities: int
     analytics_version: str
+
+
+class CaseChronologyResponse(BaseModel):
+    """How the case's contact record sits around the declared incident window."""
+
+    incident_window_declared: bool
+    incident_start: datetime | None
+    incident_end: datetime | None
+    contacts_placed: dict[str, int]
+    contacts_without_established_time: bool
+    temporal_version: str
+
+
+class TemporalFindingResponse(BaseModel):
+    subject: EntityEndpointResponse
+    object: EntityEndpointResponse
+    contacts: int
+    first: datetime
+    last: datetime
+    evidence_ids: list[str]
+    relation_ids: list[str]
+    detail: str
+    # The span itself, so a caller can rank or filter without re-parsing the sentence. Only one is
+    # meaningful per finding: a burst has a duration, a pre-incident finding has a lead time.
+    minutes: int | None = None
+    hours_before: float | None = None
