@@ -471,6 +471,9 @@ class Report(Base):
     )
     review_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     redaction_profile: Mapped[str] = mapped_column(String(64), nullable=False, default="standard")
+    # Who this report is for. Redaction says what to hide from a reader; the profile says what that
+    # reader is being handed at all.
+    profile: Mapped[str] = mapped_column(String(32), nullable=False, default="case_file")
     storage_key: Mapped[str | None] = mapped_column(String(1024), unique=True)
     generated_by_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(Text)

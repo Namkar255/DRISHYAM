@@ -111,16 +111,18 @@ def _unique_relations(relations: list) -> list:
 
 # The entity classes SIH26189 names, in the order a reader thinks about them: who, then what they
 # moved in, then where, then under whose name.
+# Plural and singular both, because a briefing states these in a sentence and "1 organisations"
+# is the kind of detail a reader notices instead of the finding beside it.
 NETWORK_ENTITY_CLASSES = (
-    ("person", "People named"),
-    ("vehicle", "Vehicles"),
-    ("location", "Places"),
-    ("organisation", "Organisations"),
-    ("phone", "Phone numbers"),
-    ("upi", "UPI handles"),
-    ("account", "Accounts"),
-    ("email", "Email addresses"),
-    ("reference", "Transaction references"),
+    ("person", "People named", "person named"),
+    ("vehicle", "Vehicles", "vehicle"),
+    ("location", "Places", "place"),
+    ("organisation", "Organisations", "organisation"),
+    ("phone", "Phone numbers", "phone number"),
+    ("upi", "UPI handles", "UPI handle"),
+    ("account", "Accounts", "account"),
+    ("email", "Email addresses", "email address"),
+    ("reference", "Transaction references", "transaction reference"),
 )
 
 
@@ -195,7 +197,11 @@ def _network_snapshot(db: Session, case_id: str) -> dict:
         "ranked": analytics.important_entities(db, case_id, limit=8),
         "bridges": analytics.bridge_relationships(db, case_id),
         "communities": analytics.communities(db, case_id),
-        "classes": [(label, classes.get(key, 0)) for key, label in NETWORK_ENTITY_CLASSES if classes.get(key)],
+        "classes": [
+            (plural, singular, classes.get(key, 0))
+            for key, plural, singular in NETWORK_ENTITY_CLASSES
+            if classes.get(key)
+        ],
         "entity_total": len(entities),
         "relation_total": len(relations),
         "across_sources": across_sources[:10],
@@ -291,10 +297,10 @@ def _snapshot(db: Session, case_id: str) -> dict:
     }
 
 
-def create_report_record(db: Session, *, case_id: str, generated_by_id: str, redaction_profile: str = "standard") -> Report:
+def create_report_record(db: Session, *, case_id: str, generated_by_id: str, redaction_profile: str = "standard", profile: str = "case_file") -> Report:
     highest = db.scalar(select(func.max(Report.version)).where(Report.case_id == case_id)) or 0
     snapshot_hash = hashlib.sha256(json.dumps(_snapshot(db, case_id), sort_keys=True, default=str).encode("utf-8")).hexdigest()
-    report = Report(case_id=case_id, version=highest + 1, review_snapshot_hash=snapshot_hash, redaction_profile=redaction_profile, generated_by_id=generated_by_id)
+    report = Report(case_id=case_id, version=highest + 1, review_snapshot_hash=snapshot_hash, redaction_profile=redaction_profile, profile=profile, generated_by_id=generated_by_id)
     db.add(report)
     db.flush()
     return report
@@ -845,6 +851,133 @@ _BASIS_LABEL = {
 }
 
 
+def _describe_reference(reference: object) -> str:
+    """Where a statement was read, in the words somebody would use to go and look."""
+    if not isinstance(reference, dict):
+        return ""
+    parts: list[str] = []
+    if reference.get("page"):
+        parts.append(f"page {reference['page']}")
+    if reference.get("row"):
+        parts.append(f"row {reference['row']}")
+    if reference.get("column"):
+        parts.append(f'column "{reference["column"]}"')
+    if not parts and reference.get("line_start"):
+        start, end = reference["line_start"], reference.get("line_end") or reference["line_start"]
+        parts.append(f"line {start}" if start == end else f"lines {start}-{end}")
+    if not parts and reference.get("kind"):
+        parts.append(str(reference["kind"]).replace("_", " "))
+    return ", ".join(parts)
+
+
+def _numbered_findings(db: Session, case_id: str, snapshot: dict) -> list[dict]:
+    """The case's findings, each with a number that can be cited elsewhere.
+
+    A finding written only as prose cannot be referred to. An FIR, a case diary or a chargesheet
+    needs to be able to say "DRISHYAM finding F-07" and have that mean one specific statement with
+    one specific source, stable across the whole document.
+
+    Ordered by how much of the case rests on each: a relationship that is the only link between two
+    parts of the network comes before one of many parallel observations, because that is the order
+    in which being wrong matters.
+    """
+    from app.graph import analytics
+
+    relations = db.scalars(select(EntityRelation).where(EntityRelation.case_id == case_id)).all()
+    if not relations:
+        return []
+
+    labels = {item.id: item.value for item in db.scalars(select(Entity).where(Entity.case_id == case_id))}
+    files = {item.id: item.original_name for item in db.scalars(select(EvidenceFile).where(EvidenceFile.case_id == case_id))}
+
+    # The pairs the network cannot do without. Their observations are listed first.
+    load_bearing = set()
+    for bridge in analytics.bridge_relationships(db, case_id):
+        pair = ((bridge.get("subject") or {}).get("id"), (bridge.get("object") or {}).get("id"))
+        load_bearing.add(frozenset(pair))
+
+    ordered = sorted(
+        relations,
+        key=lambda item: (
+            0 if frozenset((item.subject_entity_id, item.object_entity_id)) in load_bearing else 1,
+            -float(item.confidence or 0),
+            item.created_at or 0,
+        ),
+    )
+
+    findings: list[dict] = []
+    for number, relation in enumerate(ordered, start=1):
+        subject = labels.get(relation.subject_entity_id, "an unresolved identity")
+        target = labels.get(relation.object_entity_id, "an unresolved identity")
+        meaning = str(relation.relation_type).replace("_", " ").lower()
+        place = _describe_reference(relation.source_reference)
+        findings.append({
+            "id": f"F-{number:02d}",
+            "statement": f"{subject} {meaning} {target}.",
+            "file": files.get(relation.source_evidence_id, "an evidence file no longer in this case"),
+            "place": place,
+            "confidence": float(relation.confidence or 0),
+            "verification": str(relation.verification_status or "machine_extracted").replace("_", " "),
+            "load_bearing": frozenset((relation.subject_entity_id, relation.object_entity_id)) in load_bearing,
+        })
+    return findings
+
+
+def _append_numbered_findings(story: list[object], styles, findings: list[dict], *, limit: int = 40) -> None:
+    """Print the findings so each one can be cited by number and opened at its source."""
+    if not findings:
+        story.append(
+            Paragraph(
+                "This case records no relationship between two resolved identities, so there is no numbered finding "
+                "to state. That is an absence of recorded evidence, not a finding that no relationship exists.",
+                styles["BodyText"],
+            )
+        )
+        return
+
+    story.append(
+        Paragraph(
+            "Each finding below is one statement read from one source. The reference is the exact place inside that "
+            "file, so a finding can be cited by its number and checked at its origin. A finding is what the evidence "
+            "records, not a conclusion about what it means.",
+            styles["BodyText"],
+        )
+    )
+    story.append(Spacer(1, 3 * mm))
+
+    rows = [[_cell("No."), _cell("Finding"), _cell("Read from"), _cell("Confidence"), _cell("Verification")]]
+    for item in findings[:limit]:
+        marker = f"{item['id']}*" if item["load_bearing"] else item["id"]
+        source = item["file"] + (f" — {item['place']}" if item["place"] else "")
+        rows.append([
+            _cell(marker),
+            _cell(item["statement"]),
+            _cell(_shorten(source, 60)),
+            _cell(f"{item['confidence']:.2f}"),
+            _cell(item["verification"]),
+        ])
+    table = Table(rows, colWidths=[15 * mm, 68 * mm, 58 * mm, 20 * mm, 21 * mm], repeatRows=1)
+    table.setStyle(_report_table_style())
+    story.extend([table, Spacer(1, 3 * mm)])
+
+    if any(item["load_bearing"] for item in findings[:limit]):
+        story.append(
+            Paragraph(
+                "<font size=7 color='#6b6258'>* This finding is the only link between two parts of the network. If it "
+                "is a misreading, the connection it carries does not exist. Verify these first.</font>",
+                styles["BodyText"],
+            )
+        )
+    if len(findings) > limit:
+        story.append(
+            Paragraph(
+                f"<font size=7 color='#6b6258'>{len(findings) - limit} further finding(s) are recorded in the case and "
+                "omitted here for length. They remain in the record and in the full case file.</font>",
+                styles["BodyText"],
+            )
+        )
+
+
 def _append_network_sections(story: list[object], styles, snapshot: dict) -> None:
     """The criminal network: who is in it, who holds it together, and what it does not establish.
 
@@ -890,7 +1023,7 @@ def _append_network_sections(story: list[object], styles, snapshot: dict) -> Non
     classes = network.get("classes") or []
     if classes:
         story.append(Paragraph("Entities recorded, by class", styles["Heading2"]))
-        rows = [[_cell("Class"), _cell("Recorded")]] + [[_cell(label), _cell(str(count))] for label, count in classes]
+        rows = [[_cell("Class"), _cell("Recorded")]] + [[_cell(plural), _cell(str(count))] for plural, _singular, count in classes]
         table = Table(rows, colWidths=[95 * mm, 40 * mm], hAlign="LEFT")
         table.setStyle(_report_table_style())
         story.extend([table, Spacer(1, 3 * mm)])
@@ -1188,6 +1321,344 @@ def _append_grounded_sections(story: list[object], styles, snapshot: dict) -> No
         ))
 
 
+# Four readers, four documents. One report serving all of them served none of them well: the
+# briefing a station officer needs was buried on page nine, and a court was handed network rankings
+# mixed in with the evidence register as though both were the same kind of statement.
+REPORT_PROFILES = ("case_file", "briefing", "court_annexure", "handover")
+
+PROFILE_TITLES = {
+    "case_file": "Criminal Network Analysis Report",
+    "briefing": "Investigation Briefing",
+    "court_annexure": "Evidence Annexure and Integrity Record",
+    "handover": "Case Handover Pack",
+}
+
+
+def _finalise(db: Session, report: Report, output: Path, story: list[object], case: dict) -> dict:
+    """Render the story, seal it, and record where it went. Every profile ends here."""
+    _apply_reference_table_rhythm(story)
+    SimpleDocTemplate(
+        str(output),
+        pagesize=A4,
+        rightMargin=14 * mm,
+        leftMargin=14 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title=f"DRISHYAM report {case['number']}",
+    ).build(story, onFirstPage=_draw_report_frame, onLaterPages=_draw_report_frame)
+
+    report.status = ProcessingState.SUCCEEDED
+    report.storage_key = report_storage_key(str(output.relative_to(settings.generated_reports_root)))
+    report.generated_at = utcnow()
+    report.failure_reason = None
+    receipt = create_receipt(db, report, output)
+    publish_private_file(output, report.storage_key, content_type="application/pdf")
+    publish_private_file(
+        output.parent / "trustify" / f"report-v{report.version}-manifest.json",
+        receipt.manifest_storage_key,
+        content_type="application/json",
+    )
+    db.commit()
+    return {
+        "report_id": report.id,
+        "path": str(output),
+        "status": report.status.value,
+        "trustify": {"verification_id": receipt.verification_id, "manifest_hash": receipt.manifest_hash},
+    }
+
+
+def _profile_cover(styles, snapshot: dict, profile: str) -> list[object]:
+    case = snapshot["case"]
+    return [
+        Spacer(1, 38 * mm),
+        Paragraph("DRISHYAM", styles["Cover"]),
+        Paragraph(
+            PROFILE_TITLES.get(profile, "Report"),
+            ParagraphStyle(name="ProfileSub", parent=styles["Heading2"], alignment=TA_CENTER, textColor=INK),
+        ),
+        Spacer(1, 4 * mm),
+        Paragraph(
+            f"<para alignment='center'>{_safe(case['number'])} &nbsp;·&nbsp; {_safe(case['title'])}<br/>"
+            f"<font size=7 color='#6b6258'>Generated {_display_timestamp(utcnow())}</font></para>",
+            styles["BodyText"],
+        ),
+        PageBreak(),
+    ]
+
+
+def _build_briefing(db: Session, report: Report, styles, snapshot: dict, findings: list[dict]) -> list[object]:
+    """What a station officer needs before deciding where to put people.
+
+    Short on purpose. Everything here is in the full case file too; the value of this document is
+    what it leaves out.
+    """
+    network = snapshot.get("network") or {}
+    overview = network.get("overview") or {}
+    ranked = (network.get("ranked") or [])[:3]
+    bridges = network.get("bridges") or []
+
+    story = _profile_cover(styles, snapshot, "briefing")
+    story.append(Paragraph("What this case records", styles["Heading1"]))
+    story.append(
+        Paragraph(
+            f"{len(snapshot['evidence'])} evidence file(s) have been read. They state "
+            f"<b>{network.get('relation_total', 0)}</b> relationship observation(s) between "
+            f"<b>{overview.get('entities', 0)}</b> resolved identities, in "
+            f"<b>{overview.get('communities', 0)}</b> connected group(s). "
+            f"<b>{len(bridges)}</b> of those relationships are the only link between two parts of the network.",
+            styles["BodyText"],
+        )
+    )
+    classes = network.get("classes") or []
+    if classes:
+        story.append(Spacer(1, 2 * mm))
+        story.append(
+            Paragraph(
+                ", ".join(
+                    f"<b>{count}</b> {(singular if count == 1 else plural).lower()}"
+                    for plural, singular, count in classes
+                )
+                + ".",
+                styles["BodyText"],
+            )
+        )
+
+    if ranked:
+        story.append(Spacer(1, 4 * mm))
+        story.append(Paragraph("Where to look first", styles["Heading2"]))
+        for entry in ranked:
+            story.append(
+                Paragraph(
+                    f"<b>{_safe(_shorten(entry.get('label'), 46))}</b> "
+                    f"<font size=7 color='#8a7d71'>({_network_label(entry.get('entity_type'))} · "
+                    f"{entry.get('supporting_evidence_count', 0)} evidence file(s))</font><br/>{_safe(entry.get('why'))}",
+                    styles["BodyText"],
+                )
+            )
+            story.append(Spacer(1, 2 * mm))
+        story.append(
+            Paragraph(
+                "<font size=7 color='#6b6258'>Network position indicates review priority. It is not an indication of "
+                "guilt, and it describes the evidence gathered so far rather than the world.</font>",
+                styles["BodyText"],
+            )
+        )
+
+    fragile = [item for item in findings if item["load_bearing"]][:5]
+    if fragile:
+        story.append(Spacer(1, 4 * mm))
+        story.append(Paragraph("Verify these before acting on anything", styles["Heading2"]))
+        for item in fragile:
+            source = item["file"] + (f" — {item['place']}" if item["place"] else "")
+            story.append(Paragraph(f"<b>{item['id']}</b> &nbsp; {_safe(item['statement'])} <font size=7 color='#8a7d71'>({_safe(_shorten(source, 50))})</font>", styles["BodyText"]))
+        story.append(
+            Paragraph(
+                "<font size=7 color='#6b6258'>Each is the only link between two parts of the network. If one is a "
+                "misreading, everything it joins comes apart.</font>",
+                styles["BodyText"],
+            )
+        )
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("What this case does not establish", styles["Heading2"]))
+    gaps = []
+    chronology = network.get("chronology") or {}
+    if not chronology.get("incident_window_declared"):
+        gaps.append("No incident window is declared, so contact cannot be placed before or after the incident.")
+    unreviewed = [item for item in findings if "machine" in item["verification"]]
+    if unreviewed:
+        gaps.append(f"{len(unreviewed)} of {len(findings)} finding(s) have not yet been confirmed by a person.")
+    if snapshot.get("alerts"):
+        gaps.append(f"{len(snapshot['alerts'])} review lead(s) are open and are reasons to read evidence, not findings.")
+    gaps.append("Nothing in this document establishes identity, intent or responsibility.")
+    for gap in gaps:
+        story.append(Paragraph("• " + gap, styles["BodyText"]))
+    return story
+
+
+def _build_court_annexure(db: Session, report: Report, styles, snapshot: dict, evidence_records: list) -> list[object]:
+    """The evidence and how it was handled. No interpretation, by design.
+
+    A ranking, an alert and a network position are readings this system produced. They belong in an
+    investigator's file and not in an annexure, where their presence beside a hash invites them to
+    be read as the same kind of statement. What is here is what can be attested to: which files
+    exist, what they hash to, when they arrived, what was run over them, and who touched them.
+    """
+    story = _profile_cover(styles, snapshot, "court_annexure")
+    story.append(Paragraph("Scope of this annexure", styles["Heading1"]))
+    story.append(
+        Paragraph(
+            "This annexure records the electronic evidence held in this case and the handling of it. It contains no "
+            "analysis, no ranking and no finding. Statements about what the evidence means are made in the case file "
+            "and are not repeated here, so that nothing in this document can be read as an assertion by the system "
+            "about any person.",
+            styles["BodyText"],
+        )
+    )
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("Evidence register", styles["Heading2"]))
+    rows = [[_cell("#"), _cell("File"), _cell("SHA-256"), _cell("Received"), _cell("State")]]
+    for index, item in enumerate(evidence_records, start=1):
+        rows.append([
+            _cell(str(index)),
+            _cell(_shorten(item.original_name, 40)),
+            _cell(_shorten(item.sha256 or "not recorded", 34)),
+            _cell(_display_timestamp(item.uploaded_at)),
+            _cell(str(item.status.value).replace("_", " ")),
+        ])
+    if len(rows) == 1:
+        rows.append([_cell("—"), _cell("No evidence is held in this case."), _cell("—"), _cell("—"), _cell("—")])
+    table = Table(rows, colWidths=[10 * mm, 55 * mm, 58 * mm, 32 * mm, 27 * mm], repeatRows=1)
+    table.setStyle(_report_table_style())
+    story.extend([table, Spacer(1, 3 * mm)])
+    story.append(
+        Paragraph(
+            "<font size=7 color='#6b6258'>Each hash is of the file exactly as received. A file whose hash differs from "
+            "the value recorded here is not the file this case was built on.</font>",
+            styles["BodyText"],
+        )
+    )
+
+    # A processing run belongs to a file, not to a case, so the register above is what scopes it.
+    evidence_ids = [item.id for item in evidence_records]
+    runs = (
+        db.scalars(
+            select(ProcessingRun).where(ProcessingRun.evidence_id.in_(evidence_ids)).order_by(ProcessingRun.created_at)
+        ).all()
+        if evidence_ids
+        else []
+    )
+    named = {item.id: item.original_name for item in evidence_records}
+    if runs:
+        story.append(PageBreak())
+        story.append(Paragraph("Processing record", styles["Heading2"]))
+        story.append(
+            Paragraph(
+                "What was run over this evidence, when, and with what outcome. Listed so that the handling of the "
+                "material can be examined independently of any conclusion drawn from it.",
+                styles["BodyText"],
+            )
+        )
+        rows = [[_cell("File"), _cell("Stage"), _cell("Started"), _cell("Completed"), _cell("Outcome")]]
+        for item in runs[:60]:
+            rows.append([
+                _cell(_shorten(named.get(item.evidence_id, "—"), 26)),
+                _cell(str(item.pipeline_stage)),
+                _cell(_display_timestamp(item.started_at)),
+                _cell(_display_timestamp(item.completed_at)),
+                _cell(str(item.state.value)),
+            ])
+        table = Table(rows, colWidths=[46 * mm, 38 * mm, 34 * mm, 34 * mm, 30 * mm], repeatRows=1)
+        table.setStyle(_report_table_style(header="slate"))
+        story.extend([table, Spacer(1, 3 * mm)])
+
+    entries = db.scalars(
+        select(AuditLog).where(AuditLog.case_id == report.case_id).order_by(AuditLog.created_at.desc())
+    ).all()
+    story.append(PageBreak())
+    story.append(Paragraph("Access and handling record", styles["Heading2"]))
+    story.append(
+        Paragraph(
+            f"{len(entries)} recorded action(s) against this case. The most recent are listed. The record is "
+            "append-only: an action taken cannot be removed from it.",
+            styles["BodyText"],
+        )
+    )
+    rows = [[_cell("When"), _cell("Action"), _cell("Object"), _cell("Outcome")]]
+    for item in entries[:60]:
+        rows.append([
+            _cell(_display_timestamp(item.created_at)),
+            _cell(str(item.action)),
+            _cell(_shorten(f"{item.object_type or ''} {item.object_id or ''}".strip(), 34)),
+            _cell(str(item.outcome or "")),
+        ])
+    if len(rows) == 1:
+        rows.append([_cell("—"), _cell("No action has been recorded against this case."), _cell("—"), _cell("—")])
+    table = Table(rows, colWidths=[36 * mm, 58 * mm, 56 * mm, 32 * mm], repeatRows=1)
+    table.setStyle(_report_table_style(header="slate"))
+    story.extend([table, Spacer(1, 4 * mm)])
+    story.append(
+        Paragraph(
+            "This annexure and its manifest are sealed together. The verification identifier issued with this document "
+            "can be used to confirm that neither has been altered since it was generated.",
+            styles["BodyText"],
+        )
+    )
+    return story
+
+
+def _build_handover(db: Session, report: Report, styles, snapshot: dict, findings: list[dict]) -> list[object]:
+    """What the next officer needs in order to pick this case up.
+
+    The question this answers is not "what does the case say" but "where was it left" -- what has
+    been checked, what has not, and what the last person had not got to.
+    """
+    network = snapshot.get("network") or {}
+    story = _profile_cover(styles, snapshot, "handover")
+
+    story.append(Paragraph("State of this case", styles["Heading1"]))
+    confirmed = [item for item in findings if "machine" not in item["verification"]]
+    story.append(
+        Paragraph(
+            f"{len(snapshot['evidence'])} evidence file(s) read. {len(findings)} numbered finding(s) recorded, of which "
+            f"<b>{len(confirmed)}</b> have been confirmed by a person and <b>{len(findings) - len(confirmed)}</b> have "
+            f"not. {len(snapshot.get('alerts') or [])} review lead(s) are open. Case status: "
+            f"{_safe(snapshot['case']['status'])}.",
+            styles["BodyText"],
+        )
+    )
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("Not yet checked by a person", styles["Heading2"]))
+    outstanding = [item for item in findings if "machine" in item["verification"]]
+    if not outstanding:
+        story.append(Paragraph("Every recorded finding has been reviewed.", styles["BodyText"]))
+    else:
+        story.append(
+            Paragraph(
+                "These are machine readings that no reviewer has confirmed or rejected. They are the work in front of "
+                "you, in the order in which being wrong matters most.",
+                styles["BodyText"],
+            )
+        )
+        _append_numbered_findings(story, styles, outstanding, limit=25)
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("Open review leads", styles["Heading2"]))
+    alerts = snapshot.get("alerts") or []
+    if not alerts:
+        story.append(Paragraph("No review lead is open against this case.", styles["BodyText"]))
+    else:
+        rows = [[_cell("Severity"), _cell("Lead"), _cell("Status")]]
+        for item in alerts[:25]:
+            rows.append([_cell(str(item["severity"]).upper()), _cell(_shorten(item["explanation"], 120)), _cell(str(item["status"]))])
+        table = Table(rows, colWidths=[24 * mm, 128 * mm, 30 * mm], repeatRows=1)
+        table.setStyle(_report_table_style(header="slate"))
+        story.extend([table, Spacer(1, 2 * mm)])
+        story.append(
+            Paragraph(
+                "<font size=7 color='#6b6258'>A lead is a reason to read the named evidence. It is never a finding.</font>",
+                styles["BodyText"],
+            )
+        )
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("What is missing", styles["Heading2"]))
+    chronology = network.get("chronology") or {}
+    missing = []
+    if not chronology.get("incident_window_declared"):
+        missing.append("No incident window is set on this case, so no contact can be placed relative to the incident. Setting the incident date enables that reading.")
+    isolated = (network.get("overview") or {}).get("isolated_entities", 0)
+    if isolated:
+        missing.append(f"{isolated} resolved identit(ies) are connected to nothing else in the case. Either the evidence linking them has not arrived, or they are incidental.")
+    if not missing:
+        missing.append("Nothing structural is missing from this case as it stands.")
+    for item in missing:
+        story.append(Paragraph("• " + item, styles["BodyText"]))
+    return story
+
+
 def generate_report(report_id: str) -> dict:
     """Render a fresh PDF from the report’s current snapshot—never from a static document template alone."""
     from app.core.db import SessionLocal
@@ -1236,6 +1707,18 @@ def generate_report(report_id: str) -> dict:
         alert_records = db.scalars(select(Alert).where(Alert.case_id == report.case_id)).all()
         claim_records = db.scalars(select(Claim).where(Claim.case_id == report.case_id).order_by(Claim.created_at)).all()
         contradiction_records = db.scalars(select(Contradiction).where(Contradiction.case_id == report.case_id).order_by(Contradiction.created_at)).all()
+        # A profile other than the full case file is a different document for a different reader,
+        # not a filtered version of this one, so it is written rather than trimmed.
+        if report.profile in {"briefing", "court_annexure", "handover"}:
+            findings = _numbered_findings(db, report.case_id, snapshot)
+            if report.profile == "briefing":
+                profile_story = _build_briefing(db, report, styles, snapshot, findings)
+            elif report.profile == "handover":
+                profile_story = _build_handover(db, report, styles, snapshot, findings)
+            else:
+                profile_story = _build_court_annexure(db, report, styles, snapshot, evidence_records)
+            return _finalise(db, report, output, profile_story, snapshot["case"])
+
         entities_by_type = Counter(label for item in entity_records if (label := _entity_display(item.entity_type)))
         alerts_by_severity = Counter(item.severity.value for item in alert_records)
         entity_chart = _render_bar_chart(output.parent / f"{output.stem}-entities.png", "Extracted entities by type", list(entities_by_type), list(entities_by_type.values()), "#59636a", "Entities")
@@ -1455,6 +1938,9 @@ def generate_report(report_id: str) -> dict:
         manifest_table = Table(manifest, colWidths=[37 * mm, 32 * mm, 30 * mm, 24 * mm, 59 * mm], repeatRows=1)
         manifest_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4)]))
         story.extend([PageBreak(), Paragraph("Key findings and review", styles["Heading1"]), Paragraph("The following observations should be considered with their listed source and review state.", styles["BodyText"]), Paragraph("Evidence-linked findings", styles["Heading2"])])
+        story.append(Paragraph("Numbered findings", styles["Heading2"]))
+        _append_numbered_findings(story, styles, _numbered_findings(db, report.case_id, snapshot))
+        story.append(Spacer(1, 5 * mm))
         findings = [event for event in snapshot["events"] if event["review"] == "confirmed"][:5]
         finding_rows = [[_cell("Finding / event"), _cell("Supporting source"), _cell("Review state")]]
         if findings:
@@ -1486,16 +1972,7 @@ def generate_report(report_id: str) -> dict:
         conclusion_table = Table(conclusion_rows, colWidths=[55 * mm, 127 * mm], repeatRows=1)
         conclusion_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 5), ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#fbf5ec"))]))
         story.extend([finding_table, Spacer(1, 5 * mm), Paragraph("Conflicting information / reviewable gaps", styles["Heading2"]), gap_table, Spacer(1, 5 * mm), Paragraph("Recommended next investigator actions", styles["Heading2"]), Paragraph("These prompts are derived from current evidence and review state. They are not legal conclusions or mandatory instructions.", styles["BodyText"]), recommendation_table, PageBreak(), Paragraph("Report conclusion", styles["Heading1"]), conclusion_table, Spacer(1, 7 * mm), Paragraph("Conclusion narrative", styles["NarrativeHeading"]), Spacer(1, 3.5 * mm), Paragraph(_controlled_conclusion(db.get(Case, report.case_id), evidence_count=len(evidence_records), event_count=len(snapshot["events"]), relationship_count=graph_metrics.get("edge_count", 0), alert_count=len(alert_records), review_count=len(reviews)), styles["NarrativeCallout"]), Paragraph("Important note", styles["Heading2"]), Paragraph("Use this report together with its listed evidence and review notes. Check important findings against the original source material before taking further action.", styles["BodyText"]), Spacer(1, 5 * mm), Paragraph("Caution", styles["Heading2"]), Paragraph("This report records source-linked evidence, machine-derived leads, and human-review states. It does not determine guilt, identity, truthfulness, legal admissibility, or a legal outcome, and it does not replace independent evidentiary verification.", styles["BodyText"]), ])
-        _apply_reference_table_rhythm(story)
-        SimpleDocTemplate(str(output), pagesize=A4, rightMargin=14 * mm, leftMargin=14 * mm, topMargin=18 * mm, bottomMargin=18 * mm, title=f"DRISHYAM report {case['number']}").build(story, onFirstPage=_draw_report_frame, onLaterPages=_draw_report_frame)
-        report.status, report.storage_key, report.generated_at, report.failure_reason = ProcessingState.SUCCEEDED, report_storage_key(str(output.relative_to(settings.generated_reports_root))), utcnow(), None
-        receipt = create_receipt(db, report, output)
-        publish_private_file(output, report.storage_key, content_type="application/pdf")
-        publish_private_file(output.parent / "trustify" / f"report-v{report.version}-manifest.json", receipt.manifest_storage_key, content_type="application/json")
-        story_note = {"verification_id": receipt.verification_id, "manifest_hash": receipt.manifest_hash}
-        report.failure_reason = None
-        db.commit()
-        return {"report_id": report.id, "path": str(output), "status": report.status.value, "trustify": story_note}
+        return _finalise(db, report, output, story, case)
     except Exception as exc:
         db.rollback()
         report = db.get(Report, report_id)

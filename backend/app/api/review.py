@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DbSession
 from app.models.entities import Alert, AuditLog, Entity, Event, EvidenceFile, Report, Transaction, TrustifyReceipt
-from app.schemas.reports import ReportResponse
+from app.schemas.reports import ReportRequest, ReportResponse
 from app.schemas.review import ReviewRequest, ReviewResponse
 from app.services.audit import audit
 from app.services.cases import require_case_access
@@ -34,10 +34,22 @@ def review_subject(case_id: str, subject_type: str, subject_id: str, payload: Re
 
 
 @router.post("/reports", response_model=ReportResponse, status_code=status.HTTP_202_ACCEPTED)
-def create_report(case_id: str, current_user: CurrentUser, db: DbSession) -> ReportResponse:
+def create_report(case_id: str, current_user: CurrentUser, db: DbSession, payload: ReportRequest | None = None) -> ReportResponse:
+    """Generate a report for this case.
+
+    The body is optional so that callers written before profiles existed keep getting the full case
+    file, which is what they were always getting.
+    """
     require_case_access(db, case_id, current_user)
-    report = create_report_record(db, case_id=case_id, generated_by_id=current_user.id)
-    audit(db, action="report.create", object_type="report", object_id=report.id, case_id=case_id, outcome="queued", actor_id=current_user.id)
+    request = payload or ReportRequest()
+    report = create_report_record(
+        db,
+        case_id=case_id,
+        generated_by_id=current_user.id,
+        redaction_profile=request.redaction_profile,
+        profile=request.profile,
+    )
+    audit(db, action="report.create", object_type="report", object_id=report.id, case_id=case_id, outcome="queued", actor_id=current_user.id, details={"profile": request.profile})
     db.commit()
     generate_report_task.delay(report.id)
     return ReportResponse.model_validate(report, from_attributes=True)
