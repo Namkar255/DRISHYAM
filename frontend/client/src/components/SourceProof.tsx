@@ -6,74 +6,74 @@
  * evidence, one gesture, on a loop. A reader should understand what "opens at its source" means
  * before they have finished reading the heading beside it.
  *
- * The three frames are the real ones from the benchmark case: block-2 of a chat screenshot, row 2
- * column a_party of a call record, page 1 line 6 of an FIR. Nothing here is illustrative filler —
- * a landing page that invented a prettier example would be doing the thing this product refuses to
- * do.
+ * The three frames are the real references from the benchmark case: block-2 of a chat screenshot,
+ * row 2 column a_party of a call record, page 1 line 6 of an FIR. Nothing here is illustrative
+ * filler — a landing page that invented a prettier example would be doing the thing this product
+ * refuses to do.
+ *
+ * The mark wraps the element it marks. It was first written as an absolutely positioned box placed
+ * by percentage, which drifted onto the wrong line the moment the text reflowed — on a section
+ * whose whole argument is "located, never approximated". Anchoring it to the element makes it
+ * exact by construction rather than by measurement.
  */
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Crosshair } from "lucide-react";
+
+/** The element a citation points at. The rest of the frame is set in a muted ink so the
+ *  marked value is the only thing at full contrast. */
+function Mark({ children }: { children: React.ReactNode }) {
+  return <span className="source-mark">{children}</span>;
+}
 
 type Frame = {
   kind: string;
   file: string;
   place: string;
   claim: string;
-  /** Where the mark sits, as a percentage of the frame, so it scales with the card. */
-  mark: { left: string; top: string; width: string; height: string };
   body: React.ReactNode;
 };
 
-const SCREENSHOT_LINES = [
-  { text: "+919876543210", strong: true },
-  { text: "12/07/2026  20:40" },
-  { text: "Suresh here. Reporting for the" },
-  { text: "Andheri East work." },
-  { text: "12/07/2026  20:52" },
-  { text: "Send the fee before you travel." },
-];
-
-const CDR_ROWS = [
-  ["a_party", "b_party", "date", "time"],
-  ["+919876543210", "+919988776655", "12/07/2026", "19:47"],
-  ["+919876543210", "+919988776655", "12/07/2026", "20:14"],
-  ["+919876543210", "+919123456789", "12/07/2026", "20:51"],
-];
-
-const FIR_LINES = [
-  "FIRST INFORMATION REPORT",
-  "FIR No: 0142/2026    PS: Bandra",
-  "District: Mumbai Suburban",
-  "",
-  "Complainant: Protected person A",
-  "Accused (1): Suresh Yadav, +919876543210",
-  "Accused (2): Ravi Kumar, +919988776655",
-];
-
 function ScreenshotFrame() {
   return (
-    <div className="h-full w-full bg-[#12140f] p-4 font-mono text-[10px] leading-[1.9] text-[#d8d4c8]">
-      <p className="mb-3 text-[8px] tracking-[.14em] text-[#7a776d]">SYNTHETIC BENCHMARK MATERIAL</p>
-      {SCREENSHOT_LINES.map((line, index) => (
-        <p key={index} className={line.strong ? "text-[13px] font-bold text-[#f4efe2]" : ""}>
-          {line.text}
-        </p>
-      ))}
+    <div className="source-frame h-full bg-[#12140f] p-5 font-mono text-[10px] leading-[2] text-[#8d8a80]">
+      <p className="mb-3 text-[8px] tracking-[.14em] text-[#5d5b54]">SYNTHETIC BENCHMARK MATERIAL</p>
+      <p className="text-[13px] font-bold">
+        <Mark>+919876543210</Mark>
+      </p>
+      <p className="mt-3">12/07/2026 20:40</p>
+      <p>Suresh here. Reporting for the</p>
+      <p>Andheri East work.</p>
+      <p className="mt-3">12/07/2026 20:52</p>
+      <p>Send the fee before you travel.</p>
     </div>
   );
 }
 
+const CDR_ROWS = [
+  { n: 2, a: "+919876543210", b: "+919988776655", date: "12/07/2026", time: "19:47", marked: true },
+  { n: 3, a: "+919876543210", b: "+919988776655", date: "12/07/2026", time: "20:14", marked: false },
+  { n: 4, a: "+919876543210", b: "+919123456789", date: "12/07/2026", time: "20:51", marked: false },
+];
+
 function CdrFrame() {
   return (
-    <div className="h-full w-full overflow-hidden bg-[#fffdf8] p-4">
-      <table className="w-full border-collapse font-mono text-[9px]">
-        <tbody>
-          {CDR_ROWS.map((row, index) => (
-            <tr key={index} className={index === 0 ? "text-[8px] font-bold uppercase tracking-[.1em] text-[#8f493f]" : "text-[#4b3f38]"}>
-              <td className="w-6 pr-2 text-right text-[#bcae9f]">{index === 0 ? "#" : index + 1}</td>
-              {row.map((cell) => (
-                <td key={cell} className="py-[5px] pr-3">{cell}</td>
-              ))}
+    <div className="source-frame source-frame-light h-full overflow-hidden bg-[#fffdf8] p-4">
+      <table className="w-full table-fixed border-collapse font-mono text-[9px]">
+        <thead>
+          <tr className="text-[8px] font-bold uppercase tracking-[.08em] text-[#a8998c]">
+            <th className="w-5 pb-2 text-right font-bold">#</th>
+            <th className="pb-2 pl-2 text-left font-bold">a_party</th>
+            <th className="pb-2 text-left font-bold">b_party</th>
+            <th className="hidden pb-2 text-left font-bold sm:table-cell">date</th>
+          </tr>
+        </thead>
+        <tbody className="text-[#8b8077]">
+          {CDR_ROWS.map((row) => (
+            <tr key={row.n}>
+              <td className="py-[7px] pr-1 text-right text-[#c3b6a8]">{row.n}</td>
+              <td className="py-[7px] pl-2">{row.marked ? <Mark>{row.a}</Mark> : row.a}</td>
+              <td className="py-[7px]">{row.b}</td>
+              <td className="hidden py-[7px] sm:table-cell">{row.date}</td>
             </tr>
           ))}
         </tbody>
@@ -84,12 +84,15 @@ function CdrFrame() {
 
 function FirFrame() {
   return (
-    <div className="h-full w-full bg-white p-5 font-mono text-[9px] leading-[2.1] text-[#3a332c]">
-      {FIR_LINES.map((line, index) => (
-        <p key={index} className={index === 0 ? "font-bold tracking-[.06em]" : ""}>
-          {line || " "}
-        </p>
-      ))}
+    <div className="source-frame source-frame-light h-full bg-white p-5 font-mono text-[9px] leading-[2.2] text-[#9a938a]">
+      <p className="font-bold tracking-[.05em]">FIRST INFORMATION REPORT</p>
+      <p>FIR No: 0142/2026 · PS: Bandra</p>
+      <p>District: Mumbai Suburban</p>
+      <p className="mt-2">Complainant: Protected person A</p>
+      <p>
+        <Mark>Accused (1): Suresh Yadav, +919876543210</Mark>
+      </p>
+      <p>Accused (2): Ravi Kumar, +919988776655</p>
     </div>
   );
 }
@@ -100,7 +103,6 @@ const FRAMES: Frame[] = [
     file: "screenshot_plain.png",
     place: "region block-2",
     claim: "This number was read from these pixels.",
-    mark: { left: "5%", top: "20%", width: "44%", height: "12%" },
     body: <ScreenshotFrame />,
   },
   {
@@ -108,7 +110,6 @@ const FRAMES: Frame[] = [
     file: "cdr_synthetic.csv",
     place: 'row 2, column "a_party"',
     claim: "This call record names who dialled.",
-    mark: { left: "8%", top: "35%", width: "34%", height: "13%" },
     body: <CdrFrame />,
   },
   {
@@ -116,7 +117,6 @@ const FRAMES: Frame[] = [
     file: "fir_primary.pdf",
     place: "page 1, line 6",
     claim: "This report attaches the number to a stated role.",
-    mark: { left: "5%", top: "63%", width: "80%", height: "11%" },
     body: <FirFrame />,
   },
 ];
@@ -133,7 +133,7 @@ export default function SourceProof() {
     if (!node) return;
     const observer = new IntersectionObserver(
       (entries) => entries.forEach((entry) => setLive(entry.isIntersecting)),
-      { threshold: 0.3 },
+      { threshold: 0.25 },
     );
     observer.observe(node);
     return () => observer.disconnect();
@@ -142,33 +142,40 @@ export default function SourceProof() {
   useEffect(() => {
     if (!live) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const timer = window.setInterval(() => setIndex((value) => (value + 1) % FRAMES.length), 3600);
+    const timer = window.setInterval(() => setIndex((value) => (value + 1) % FRAMES.length), 3800);
     return () => window.clearInterval(timer);
   }, [live]);
 
   const frame = FRAMES[index];
 
   return (
-    <section id="source" ref={shell} className="relative mx-auto max-w-[1360px] px-6 py-24 lg:px-10 lg:py-32">
-      <div className="grid items-center gap-14 lg:grid-cols-[.85fr_1.15fr]">
-        <div>
+    <section
+      id="source"
+      ref={shell}
+      className="relative mx-auto max-w-[1300px] overflow-hidden px-6 py-24 lg:px-10 lg:py-32"
+    >
+      {/* min-w-0 on both columns: without it a wide child forces its grid track past the container
+          and the whole card slides off the right edge of the page. */}
+      <div className="grid items-center gap-10 lg:grid-cols-2 lg:gap-14">
+        <div className="min-w-0">
           <div className="inline-flex items-center gap-3 text-[10px] font-extrabold uppercase tracking-[0.16em] text-[#7f1d1d]">
             <span className="h-px w-9 bg-[#7f1d1d]" />
             <span>Traceability, shown</span>
           </div>
-          <h2 className="display-serif mt-6 text-5xl leading-[1] tracking-[-.035em]">
+          <h2 className="display-serif mt-6 text-[42px] leading-[1.02] tracking-[-.035em] sm:text-5xl">
             Every claim opens at the place it was read.
           </h2>
-          <p className="mt-6 max-w-md text-sm leading-7 text-[#605a52]">
+          <p className="mt-6 max-w-[460px] text-sm leading-7 text-[#605a52]">
             Not a footnote. Not a filename. The exact region of the screenshot, the exact cell of the call record, the
             exact line of the FIR — reachable in one click from anywhere the claim appears.
           </p>
 
-          <dl className="mt-8 space-y-3">
+          <div className="mt-8 space-y-2.5">
             {FRAMES.map((item, position) => (
               <button
                 key={item.file}
                 onClick={() => setIndex(position)}
+                aria-pressed={position === index}
                 className={`flex w-full items-start gap-3 rounded-lg border px-4 py-3 text-left transition ${
                   position === index
                     ? "border-[#b36b62] bg-[#fff4f1]"
@@ -176,17 +183,19 @@ export default function SourceProof() {
                 }`}
               >
                 <span
-                  className={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${position === index ? "bg-[#e0483c]" : "bg-[#ded2c4]"}`}
+                  className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full transition ${
+                    position === index ? "bg-[#e0483c]" : "bg-[#ded2c4]"
+                  }`}
                 />
                 <span className="min-w-0">
-                  <dt className="text-[11px] font-extrabold text-[#2e2520]">{item.kind}</dt>
-                  <dd className="mono mt-0.5 truncate text-[9px] text-[#847468]">
+                  <span className="block text-[11px] font-extrabold text-[#2e2520]">{item.kind}</span>
+                  <span className="mono mt-0.5 block truncate text-[9px] text-[#847468]">
                     {item.file} — {item.place}
-                  </dd>
+                  </span>
                 </span>
               </button>
             ))}
-          </dl>
+          </div>
 
           <p className="mt-7 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[.12em] text-[#777067]">
             <Crosshair size={14} className="text-[#7f1d1d]" />
@@ -194,10 +203,15 @@ export default function SourceProof() {
           </p>
         </div>
 
-        <div data-reveal className="paper-shadow relative overflow-hidden rounded-[24px] border border-[#e2d5c7] bg-[#f4efe6] p-5 sm:p-7">
-          <div className="flex items-center justify-between border-b border-[#e6ddd2] pb-4">
+        <div
+          data-reveal
+          className="paper-shadow relative min-w-0 overflow-hidden rounded-[22px] border border-[#e2d5c7] bg-[#f4efe6] p-4 sm:p-6"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b border-[#e6ddd2] pb-4">
             <div className="min-w-0">
-              <p className="text-[9px] font-extrabold uppercase tracking-[.14em] text-[#8f3f37]">Source · {frame.kind}</p>
+              <p className="text-[9px] font-extrabold uppercase tracking-[.14em] text-[#8f3f37]">
+                Source · {frame.kind}
+              </p>
               <p className="mono mt-1 truncate text-[10px] text-[#6b5b51]">{frame.file}</p>
             </div>
             <span className="shrink-0 rounded-full border border-[#c9dfcf] bg-[#f2faf3] px-2.5 py-1 text-[9px] font-bold text-[#34734b]">
@@ -205,12 +219,11 @@ export default function SourceProof() {
             </span>
           </div>
 
-          <div className="source-stage relative mt-5 h-[290px] overflow-hidden rounded-xl border border-[#ded2c4] bg-white">
+          <div key={index} className="mt-4 h-[268px] overflow-hidden rounded-xl border border-[#ded2c4] bg-white">
             {frame.body}
-            <span key={`${index}-mark`} className="source-mark" style={frame.mark} aria-hidden="true" />
           </div>
 
-          <p key={`${index}-claim`} className="source-claim mt-5 text-[12px] font-bold leading-6 text-[#2e2520]">
+          <p key={`${index}-claim`} className="source-claim mt-4 text-[12px] font-bold leading-6 text-[#2e2520]">
             {frame.claim}
           </p>
           <p className="mt-2 text-[9px] leading-5 text-[#847468]">
@@ -219,7 +232,7 @@ export default function SourceProof() {
 
           <a
             href="#network"
-            className="mt-6 inline-flex items-center gap-2 border-b border-[#b34b44] pb-1.5 text-[11px] font-extrabold text-[#7f1d1d]"
+            className="mt-5 inline-flex items-center gap-2 border-b border-[#b34b44] pb-1.5 text-[11px] font-extrabold text-[#7f1d1d]"
           >
             See what these sources build <ArrowRight size={15} />
           </a>
