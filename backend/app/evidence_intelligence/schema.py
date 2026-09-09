@@ -178,6 +178,7 @@ class NormalizedRecordDraft(BaseModel):
     vehicle_identifiers: list[str] = Field(default_factory=list)
     organisation_names: list[str] = Field(default_factory=list)
     person_names: list[str] = Field(default_factory=list)
+    person_roles: dict[str, str] = Field(default_factory=dict)
     location_names: list[str] = Field(default_factory=list)
     transaction_reference: str | None = None
     amount: Amount = Field(default_factory=Amount)

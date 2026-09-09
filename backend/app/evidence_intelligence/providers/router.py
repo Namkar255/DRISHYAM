@@ -61,6 +61,10 @@ LIST_FIELDS = (
     "location_names",
 )
 
+# Fields whose value is a mapping rather than a list or a scalar. Only the deterministic
+# extractor produces these; no model is asked for them.
+MAPPING_FIELDS = ("person_roles",)
+
 # Distinguishes "caller passed nothing, build from config" from "caller explicitly wants no model".
 _UNSET: Any = object()
 
@@ -161,6 +165,12 @@ def _apply_field(record: NormalizedRecordDraft, name: str, provenance: FieldProv
     if name in LIST_FIELDS:
         if isinstance(value, list):
             setattr(record, name, [str(item) for item in value])
+        return
+    # A mapping field. Without this the fallback below would stringify the whole dict onto
+    # the record, and "{'Suresh Yadav': 'accused'}" is not a role.
+    if name in MAPPING_FIELDS:
+        if isinstance(value, dict):
+            setattr(record, name, {str(key): str(item) for key, item in value.items()})
         return
     if name in {"media_content", "narration", "duration", "cell_site", "fir_number", "fir_sections", "police_station", "stated_vehicle_use", "stated_presence", "stated_vehicle_presence"}:
         if value is not None:

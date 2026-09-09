@@ -274,6 +274,11 @@ def _identifier_facts(text: str, reference: SourceReference) -> dict[str, FieldP
     if people := patterns.find_person_names(text):
         facts["person_names"] = _direct(people, quote=", ".join(people), reference=reference, confidence=0.75)
         facts["person_names"].reason = "The source states this role and name. It does not establish that the person is the same individual named elsewhere."
+        # The role the source attached to each name. Matched by the same patterns that found
+        # the names and, until now, discarded on the way out.
+        if roles := patterns.find_person_roles(text):
+            facts["person_roles"] = _direct(roles, quote=", ".join(f"{name}: {role}" for name, role in sorted(roles.items())), reference=reference, confidence=0.75)
+            facts["person_roles"].reason = "The role is what this source calls the person. Another source may call the same person something else."
     if places := patterns.find_locations(text):
         facts["location_names"] = _direct(places, quote=", ".join(places), reference=reference, confidence=0.65)
         facts["location_names"].reason = "A place marker names this location. A shared place is weak evidence of a shared party."

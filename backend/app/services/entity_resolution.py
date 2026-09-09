@@ -181,6 +181,20 @@ def _confidence_for(record: NormalizedRecord, field_name: str) -> float:
     return 0.6 if field_name in PARTY_FIELDS else 0.75
 
 
+def _stated_role(record: NormalizedRecord, field_name: str, raw: object) -> str | None:
+    """What this record called this person, where it called them anything.
+
+    Only person names carry a role. A phone number has no role, and inventing one for it would be
+    the system asserting something no source stated. Recorded against the occurrence rather than
+    the entity because a role is what one source said in one place: the same individual can be a
+    witness in one file and a suspect in another, and the entity must not have to choose.
+    """
+    if field_name != "person_names":
+        return None
+    roles = record.person_roles or {}
+    return roles.get(str(raw)) or roles.get(str(raw).strip())
+
+
 def _source_reference(record: NormalizedRecord, field_name: str) -> dict:
     provenance = (record.field_provenance or {}).get(field_name) or {}
     reference = provenance.get("source_reference")
@@ -259,6 +273,7 @@ def resolve_record(db: Session, record: NormalizedRecord, seen: set[tuple[str, s
                     observed_value=str(raw)[:512],
                     source_reference=_source_reference(record, field_name),
                     detection_method=RESOLVER_VERSION,
+                    stated_role=_stated_role(record, field_name, raw),
                     confidence=_confidence_for(record, field_name),
                 )
             )

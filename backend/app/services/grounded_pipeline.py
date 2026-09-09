@@ -182,6 +182,7 @@ def _upsert_record(db: Session, evidence: EvidenceFile, outcome: RoutingOutcome)
     record.vehicle_identifiers = draft.vehicle_identifiers
     record.organisation_names = draft.organisation_names
     record.person_names = draft.person_names
+    record.person_roles = draft.person_roles
     record.location_names = draft.location_names
     record.transaction_reference = draft.transaction_reference
     record.amount_value = draft.amount.value

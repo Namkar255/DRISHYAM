@@ -682,6 +682,9 @@ class NormalizedRecord(Base):
     vehicle_identifiers: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     organisation_names: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     person_names: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # What this record called each person: {name: role}. A role belongs to a reading, not to
+    # a person -- the same individual can be a witness in one source and a suspect in another.
+    person_roles: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     location_names: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     transaction_reference: Mapped[str | None] = mapped_column(String(160), index=True)
     amount_value: Mapped[float | None] = mapped_column(Numeric(16, 2))
@@ -763,6 +766,9 @@ class EntityOccurrence(Base):
     observed_value: Mapped[str] = mapped_column(String(512), nullable=False)
     source_reference: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     detection_method: Mapped[str] = mapped_column(String(64), nullable=False, default="grounded_pipeline")
+    # The role this source stated for this identity, where it stated one. Null is correct and
+    # common: most occurrences are of a number or a handle, which no source gives a role to.
+    stated_role: Mapped[str | None] = mapped_column(String(48))
     confidence: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False, default=0.5)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 

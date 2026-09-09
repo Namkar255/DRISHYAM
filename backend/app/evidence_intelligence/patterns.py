@@ -500,13 +500,13 @@ def find_locations(text: str) -> list[str]:
 # labels the role. Detecting capitalised word runs as names would turn every
 # heading and place into a person.
 PERSON_LABEL_PATTERN = re.compile(
-    r"\b(?:Name|Full\s+Name|Complainant|Complaint\s+By|Accused|Victim|Informant|Witness|"
+    r"\b(?P<role>Name|Full\s+Name|Complainant|Complaint\s+By|Accused|Victim|Informant|Witness|"
     r"Beneficiary|Sender|Receiver|Recipient|Payee|Payer|Driver|Owner|Applicant|Suspect|From|To)"
-    r"\s*(?:\([^)]{1,20}\))?\s*[:\-]\s*(?P<name>[A-Z][A-Za-z.]{1,20}(?:\s+[A-Z][A-Za-z.]{1,20}){0,3})"
+    r"\s*(?:\([^)]{1,20}\))?\s*[:\-]\s*(?P<name>[A-Z][A-Za-z.]{1,20}(?:(?<![A-Za-z]{2}\.)\s+[A-Z][A-Za-z.]{1,20}){0,3})"
 )
 # Indian records name a parent or spouse to disambiguate: "Ravi Kumar S/o Mohan Lal".
 PERSON_RELATION_PATTERN = re.compile(
-    r"\b[SDWsdw]\s?/\s?[Oo]\.?\s*(?P<name>[A-Z][A-Za-z.]{1,20}(?:\s+[A-Z][A-Za-z.]{1,20}){0,3})"
+    r"\b[SDWsdw]\s?/\s?[Oo]\.?\s*(?P<name>[A-Z][A-Za-z.]{1,20}(?:(?<![A-Za-z]{2}\.)\s+[A-Z][A-Za-z.]{1,20}){0,3})"
 )
 # A report header writes "Accused: Suresh Yadav"; the narrative below it writes "accused Suresh
 # Yadav was driving". The role is stated either way, and reading only the header form meant every
@@ -516,7 +516,7 @@ PERSON_RELATION_PATTERN = re.compile(
 # it would also relax [A-Z] on the name and let "states that accused Suresh" through as a person,
 # which is exactly what it did. The role alternatives therefore carry their own case classes.
 PERSON_INLINE_ROLE_PATTERN = re.compile(
-    r"\b(?:[Aa]ccused|[Cc]omplainant|[Vv]ictim|[Ii]nformant|[Ww]itness|[Ss]uspect|[Dd]eceased"
+    r"\b(?P<role>[Aa]ccused|[Cc]omplainant|[Vv]ictim|[Ii]nformant|[Ww]itness|[Ss]uspect|[Dd]eceased"
     r"|[Pp]etitioner|[Rr]espondent|[Dd]river|[Oo]wner)\s+"
     r"(?P<name>[A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,3})"
 )
@@ -543,18 +543,114 @@ def normalize_person(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
-def find_person_names(text: str) -> list[str]:
-    """Names the source attaches to a stated role. Never inferred from capitalisation."""
-    found: set[str] = set()
-    for pattern in (PERSON_LABEL_PATTERN, PERSON_RELATION_PATTERN, PERSON_INLINE_ROLE_PATTERN, PERSON_INTRODUCTION_PATTERN):
+# What a source calls somebody, reduced to the words a case actually turns on. The label is kept
+# verbatim in the provenance quote; this is the reading of it, and it is the first thing any
+# investigator asks about a name on a page.
+#
+# `named` and `relative` are deliberately not case roles. "Name: Suresh Yadav" says only that the
+# form has a name field, and "S/o Mohan Lal" names a parent for identification -- reporting either
+# as "accused" would be the system inventing a role the source never stated.
+ROLE_READINGS: dict[str, str] = {
+    "name": "named",
+    "full name": "named",
+    "complainant": "complainant",
+    "complaint by": "complainant",
+    "informant": "complainant",
+    "accused": "accused",
+    "suspect": "accused",
+    "victim": "victim",
+    "deceased": "victim",
+    "witness": "witness",
+    "driver": "driver",
+    "owner": "owner",
+    "beneficiary": "beneficiary",
+    "sender": "sender",
+    "payer": "sender",
+    "from": "sender",
+    "receiver": "receiver",
+    "recipient": "receiver",
+    "payee": "receiver",
+    "to": "receiver",
+    "applicant": "applicant",
+    "petitioner": "petitioner",
+    "respondent": "respondent",
+}
+
+# A name the person gave for themselves, and a name given as somebody's parent or spouse. Both are
+# weaker than a role a report assigns, and saying which is which is the point.
+SELF_STATED_ROLE = "self-identified"
+RELATIVE_ROLE = "relative"
+
+PERSON_PATTERNS = (
+    (PERSON_LABEL_PATTERN, None),
+    (PERSON_RELATION_PATTERN, RELATIVE_ROLE),
+    (PERSON_INLINE_ROLE_PATTERN, None),
+    (PERSON_INTRODUCTION_PATTERN, SELF_STATED_ROLE),
+)
+
+
+def _name_before_the_full_stop(raw: str) -> str:
+    """Stop a name where its sentence ends.
+
+    The patterns refuse to cross the boundary themselves -- trimming afterwards was not enough,
+    because the over-long match had already consumed the next role label and "Accused (1): Suresh
+    Yadav" was never seen at all. This remains as the tidy-up for a trailing period.
+
+    A dot is allowed inside a name so initials survive -- "R. Kumar", "Suresh K." -- but the same
+    dot lets a sentence-ending period glue the next capitalised word on: "Complainant: Priya
+    Sharma. Accused (1): ..." was read as one person called "Priya Sharma. Accused". An initial is
+    one or two characters; anything longer ending in a period is the end of a sentence.
+    """
+    words: list[str] = []
+    for word in " ".join(raw.split()).split(" "):
+        words.append(word)
+        if word.endswith(".") and len(word.rstrip(".")) > 1:
+            break
+    return " ".join(words).strip(" .")
+
+
+def _person_matches(text: str):
+    """Every name a source states, with the role it states alongside it."""
+    for pattern, fixed_role in PERSON_PATTERNS:
         for match in pattern.finditer(text):
-            name = " ".join(match.group("name").split()).strip(" .")
+            name = _name_before_the_full_stop(match.group("name"))
             # A label followed by an email or phone is an identifier, not a name.
             if EMAIL_PATTERN.search(name) or any(character.isdigit() for character in name):
                 continue
-            if len(normalize_person(name)) >= 3:
-                found.add(name)
-    return sorted(found)
+            if len(normalize_person(name)) < 3:
+                continue
+            if fixed_role is not None:
+                role = fixed_role
+            else:
+                stated = " ".join(match.group("role").split()).casefold()
+                role = ROLE_READINGS.get(stated, stated)
+            yield name, role, match.group(0)
+
+
+def find_person_names(text: str) -> list[str]:
+    """Names the source attaches to a stated role. Never inferred from capitalisation."""
+    return sorted({name for name, _role, _quote in _person_matches(text)})
+
+
+def find_person_roles(text: str) -> dict[str, str]:
+    """What each named person is called by this source.
+
+    The role was being matched and discarded: the extractor recognised "Accused (2): Ravi Kumar"
+    and kept only the name, so the first question an investigator asks -- is this the complainant
+    or the accused -- was the one thing the system threw away.
+
+    A role is what *this source* says. The same person can be a witness in one file and a suspect
+    in another, so nothing here is written to the person; it is recorded against the place it was
+    read from. Where two readings collide in one passage the stronger one wins: a report that
+    assigns a role outranks a name somebody gave for themselves.
+    """
+    strength = {SELF_STATED_ROLE: 0, RELATIVE_ROLE: 0, "named": 1}
+    roles: dict[str, str] = {}
+    for name, role, _quote in _person_matches(text):
+        current = roles.get(name)
+        if current is None or strength.get(role, 2) > strength.get(current, 2):
+            roles[name] = role
+    return roles
 
 
 # ---------------------------------------------------------------------------
