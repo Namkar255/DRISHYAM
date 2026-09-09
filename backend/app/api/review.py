@@ -49,7 +49,7 @@ def create_report(case_id: str, current_user: CurrentUser, db: DbSession, payloa
         redaction_profile=request.redaction_profile,
         profile=request.profile,
     )
-    audit(db, action="report.create", object_type="report", object_id=report.id, case_id=case_id, outcome="queued", actor_id=current_user.id, details={"profile": request.profile})
+    audit(db, action="report.create", object_type="report", object_id=report.id, case_id=case_id, outcome="queued", actor_id=current_user.id, details={"profile": request.profile, "redaction_profile": request.redaction_profile})
     db.commit()
     generate_report_task.delay(report.id)
     return ReportResponse.model_validate(report, from_attributes=True)

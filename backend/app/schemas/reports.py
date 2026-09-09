@@ -18,7 +18,7 @@ class ReportRequest(BaseModel):
     """
 
     profile: Literal["case_file", "briefing", "court_annexure", "handover"] = "case_file"
-    redaction_profile: str = Field(default="standard", max_length=64)
+    redaction_profile: Literal["protected", "identified"] = "protected"
 
 
 class ReportResponse(BaseModel):

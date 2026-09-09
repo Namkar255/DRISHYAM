@@ -13,6 +13,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from collections import Counter
+from contextvars import ContextVar
 
 import matplotlib
 matplotlib.use("Agg")
@@ -76,6 +77,27 @@ ENTITY_DISPLAY = {
     "ip_address": "IP address",
 }
 NON_IDENTITY_ENTITY_TYPES = {"amount"}
+
+
+# The report told the same story three times: once as a timeline, once as a table of grounded
+# records, and once as numbered findings. On a case with eight files that is twenty-eight pages; on
+# a real one with fifty it would be closer to eighty, and nobody reads the third telling.
+#
+# What is cut here is duplication, not evidence. Everything remains in the record and in the
+# application, and wherever a list is shortened the report says how much it is not showing --
+# a truncation a reader cannot see is a truncation that misleads them.
+TIMELINE_DETAIL_LIMIT = 12
+UNDATED_DETAIL_LIMIT = 6
+GROUNDED_ROW_LIMIT = 12
+
+
+def _omission_note(shown: int, total: int, noun: str) -> str | None:
+    if total <= shown:
+        return None
+    return (
+        f"<font size=7 color='#6b6258'>{total - shown} further {noun} are held in this case and are not listed here. "
+        "They remain in the record and can be opened in the application.</font>"
+    )
 
 
 def _entity_display(entity_type: str) -> str | None:
@@ -297,7 +319,7 @@ def _snapshot(db: Session, case_id: str) -> dict:
     }
 
 
-def create_report_record(db: Session, *, case_id: str, generated_by_id: str, redaction_profile: str = "standard", profile: str = "case_file") -> Report:
+def create_report_record(db: Session, *, case_id: str, generated_by_id: str, redaction_profile: str = "protected", profile: str = "case_file") -> Report:
     highest = db.scalar(select(func.max(Report.version)).where(Report.case_id == case_id)) or 0
     snapshot_hash = hashlib.sha256(json.dumps(_snapshot(db, case_id), sort_keys=True, default=str).encode("utf-8")).hexdigest()
     report = Report(case_id=case_id, version=highest + 1, review_snapshot_hash=snapshot_hash, redaction_profile=redaction_profile, profile=profile, generated_by_id=generated_by_id)
@@ -320,6 +342,12 @@ _FONT_SUBSTITUTIONS = {
     # part of the quote a reviewer is checking, so each keeps its conventional written form.
     "₹": "Rs", "₨": "Rs", "₩": "W", "₪": "NIS", "฿": "THB", "₫": "d",
 }
+
+
+# Set for the duration of one report render. A context variable rather than an argument because
+# every rendering helper in this module would otherwise have to carry it, and the one that forgot
+# would be the leak.
+_ACTIVE_REDACTION: ContextVar = ContextVar("drishyam_report_redaction", default=None)
 
 
 def _renderable(text: str) -> str:
@@ -345,6 +373,14 @@ def _safe(value: object) -> str:
     # `value or ""` swallowed every zero, so a count of 0 rendered as an empty cell rather than
     # as the fact that there are none.
     text = "" if value is None else str(value)
+    # Redaction is applied here, at the one point every rendered string passes through, rather than
+    # at each place a name is printed. Applied at render sites it would hold only where somebody
+    # remembered it, and a protected report that prints the name in the one table it forgot is
+    # worse than one that never offered protection. `_cell` routes through this too, so a table
+    # cell cannot escape it either.
+    active = _ACTIVE_REDACTION.get()
+    if active is not None:
+        text = active(text)
     text = _renderable(text)
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -777,7 +813,12 @@ def _append_connection_section(story: list[object], styles, snapshot: dict) -> N
     connections = snapshot.get("connections") or []
     summary = snapshot.get("connection_summary") or {}
 
-    story.extend([PageBreak(), Paragraph("How this evidence connects", styles["Heading1"])])
+    # Superseded, and kept only as a sentence. This section listed every pair of files sharing a
+    # value, one bullet each. "Identities appearing in more than one source" in the network
+    # analysis says the same thing at the level of the identity rather than the file, which is the
+    # level the reader is working at -- and says it in a table a tenth of the size.
+    story.append(Spacer(1, 5 * mm))
+    story.append(Paragraph("How this evidence connects", styles["Heading2"]))
 
     total = summary.get("evidence_count", 0)
     connected = summary.get("connected_evidence", 0)
@@ -804,9 +845,18 @@ def _append_connection_section(story: list[object], styles, snapshot: dict) -> N
     )
     story.append(Spacer(1, 4 * mm))
 
-    for item in connections:
+    # One caveat for the set, rather than the same sentence repeated under every bullet.
+    for item in connections[:6]:
         story.append(Paragraph("• " + _safe(item["sentence"]), styles["BodyText"]))
-        story.append(Paragraph("<font size=7 color='#6b6258'>" + _safe(item["caveat"]) + "</font>", styles["BodyText"]))
+    if (note := _omission_note(6, len(connections), "shared-identifier link(s)")):
+        story.append(Paragraph(note, styles["BodyText"]))
+    if connections:
+        story.append(
+            Paragraph(
+                "<font size=7 color='#6b6258'>" + _safe(connections[0].get("caveat")) + "</font>",
+                styles["BodyText"],
+            )
+        )
         story.append(Spacer(1, 2.5 * mm))
 
     rows = [[_cell("Shared value"), _cell("Type"), _cell("Appears in"), _cell("Evidence items"), _cell("Link strength")]]
@@ -870,7 +920,7 @@ def _describe_reference(reference: object) -> str:
     return ", ".join(parts)
 
 
-def _numbered_findings(db: Session, case_id: str, snapshot: dict) -> list[dict]:
+def _numbered_findings(db: Session, case_id: str, snapshot: dict, redact=None) -> list[dict]:
     """The case's findings, each with a number that can be cited elsewhere.
 
     A finding written only as prose cannot be referred to. An FIR, a case diary or a chargesheet
@@ -907,12 +957,14 @@ def _numbered_findings(db: Session, case_id: str, snapshot: dict) -> list[dict]:
 
     findings: list[dict] = []
     for number, relation in enumerate(ordered, start=1):
-        subject = labels.get(relation.subject_entity_id, "an unresolved identity")
-        target = labels.get(relation.object_entity_id, "an unresolved identity")
+        hide = redact or (lambda value: "" if value is None else str(value))
+        subject = hide(labels.get(relation.subject_entity_id, "an unresolved identity"))
+        target = hide(labels.get(relation.object_entity_id, "an unresolved identity"))
         meaning = str(relation.relation_type).replace("_", " ").lower()
         place = _describe_reference(relation.source_reference)
         findings.append({
             "id": f"F-{number:02d}",
+            "relation_id": relation.id,
             "statement": f"{subject} {meaning} {target}.",
             "file": files.get(relation.source_evidence_id, "an evidence file no longer in this case"),
             "place": place,
@@ -989,6 +1041,7 @@ def _append_network_sections(story: list[object], styles, snapshot: dict) -> Non
     network = snapshot.get("network") or {}
     overview = network.get("overview") or {}
     ranked = network.get("ranked") or []
+    hide = snapshot.get("redact") or (lambda value: "" if value is None else str(value))
 
     story.extend([PageBreak(), Paragraph("Criminal network analysis", styles["Heading1"])])
 
@@ -1049,7 +1102,7 @@ def _append_network_sections(story: list[object], styles, snapshot: dict) -> Non
             )
         )
         rows = [[_cell("Identity"), _cell("Type"), _cell("Evidence files")]]
-        rows += [[_cell(_shorten(item["label"], 46)), _cell(_network_label(item["type"])), _cell(str(item["sources"]))] for item in across]
+        rows += [[_cell(_shorten(hide(item["label"]), 46)), _cell(_network_label(item["type"])), _cell(str(item["sources"]))] for item in across]
         table = Table(rows, colWidths=[80 * mm, 45 * mm, 30 * mm], hAlign="LEFT")
         table.setStyle(_report_table_style())
         story.extend([table, Spacer(1, 4 * mm)])
@@ -1069,7 +1122,7 @@ def _append_network_sections(story: list[object], styles, snapshot: dict) -> Non
         for entry in ranked:
             story.append(
                 Paragraph(
-                    f"<b>#{entry.get('rank')} &nbsp; {_safe(_shorten(entry.get('label'), 52))}</b> "
+                    f"<b>#{entry.get('rank')} &nbsp; {_safe(_shorten(hide(entry.get('label')), 52))}</b> "
                     f"<font size=7 color='#8a7d71'>({_network_label(entry.get('entity_type'))} · "
                     f"score {float(entry.get('score', 0)):.3f} · {entry.get('supporting_evidence_count', 0)} evidence file(s))</font>",
                     styles["BodyText"],
@@ -1093,8 +1146,8 @@ def _append_network_sections(story: list[object], styles, snapshot: dict) -> Non
         )
         rows = [[_cell("Relationship"), _cell("Stated as"), _cell("Records"), _cell("Sources")]]
         for item in bridges[:12]:
-            subject = _shorten((item.get("subject") or {}).get("label"), 30)
-            target = _shorten((item.get("object") or {}).get("label"), 30)
+            subject = _shorten(hide((item.get("subject") or {}).get("label")), 30)
+            target = _shorten(hide((item.get("object") or {}).get("label")), 30)
             rows.append([
                 _cell(f"{subject} — {target}"),
                 _cell(", ".join(str(value).replace("_", " ").title() for value in item.get("relation_types") or [])),
@@ -1117,7 +1170,7 @@ def _append_network_sections(story: list[object], styles, snapshot: dict) -> Non
             )
         )
         for item in communities:
-            members = ", ".join(_shorten((member or {}).get("label"), 28) for member in (item.get("members") or [])[:8])
+            members = ", ".join(_shorten(hide((member or {}).get("label")), 28) for member in (item.get("members") or [])[:8])
             story.append(
                 Paragraph(
                     f"<b>Group {item.get('community_id')}</b> <font size=7 color='#8a7d71'>({item.get('size', 0)} identities · "
@@ -1161,7 +1214,7 @@ def _append_network_sections(story: list[object], styles, snapshot: dict) -> Non
             for item in pre:
                 pair = item.get("pair") or []
                 rows.append([
-                    _cell(" — ".join(_shorten(name, 26) for name in pair)),
+                    _cell(" — ".join(_shorten(hide(name), 26) for name in pair)),
                     _cell(str(item.get("contacts", 0))),
                     _cell(f"{float(item.get('hours_before', 0)):.1f}"),
                 ])
@@ -1176,7 +1229,7 @@ def _append_network_sections(story: list[object], styles, snapshot: dict) -> Non
         for item in bursts:
             pair = item.get("pair") or []
             rows.append([
-                _cell(" — ".join(_shorten(name, 26) for name in pair)),
+                _cell(" — ".join(_shorten(hide(name), 26) for name in pair)),
                 _cell(str(item.get("contacts", 0))),
                 _cell(str(int(item.get("minutes", 0)))),
             ])
@@ -1260,14 +1313,17 @@ def _append_grounded_sections(story: list[object], styles, snapshot: dict) -> No
         ])
 
     rows = [[_cell("Source"), _cell("What the source shows"), _cell("Event"), _cell("Sender"), _cell("Receiver"), _cell("Amount"), _cell("Confidence")]]
-    for item in records:
+    # Every one of these rows is also a line in the chronology above and, where it states a
+    # relationship, a numbered finding below. Three tellings of one case is what made this report
+    # twenty-eight pages; the count and a representative set carry the same information.
+    for item in records[:GROUNDED_ROW_LIMIT]:
         amount = f"{item['currency'] or ''} {item['amount']:,.2f}".strip() if item["amount"] is not None else "Not established"
         confidence = f"{_safe(item['band'])} / {_safe(item['validation_status'])}"
         if item["requires_review"]:
             confidence += " · review required"
         rows.append([
             _cell(item["source"]),
-            _cell(item["summary"] or (item["observed_text"] or "")[:300] or "—"),
+            _cell(_shorten(item["summary"] or item["observed_text"] or "—", 180)),
             _cell(_grounded_field(item["event_type"], item["basis"])),
             _cell(_grounded_field(item["sender"], item["basis"])),
             _cell(_grounded_field(item["receiver"], item["basis"])),
@@ -1277,6 +1333,9 @@ def _append_grounded_sections(story: list[object], styles, snapshot: dict) -> No
     table = Table(rows, colWidths=[26 * mm, 52 * mm, 26 * mm, 26 * mm, 26 * mm, 22 * mm, 24 * mm], repeatRows=1)
     table.setStyle(_report_table_style(header="charcoal"))
     story.extend([table, Spacer(1, 4 * mm)])
+    if (note := _omission_note(GROUNDED_ROW_LIMIT, len(records), "grounded record(s)")):
+        story.append(Paragraph(note, styles["BodyText"]))
+        story.append(Spacer(1, 2 * mm))
 
     conflicted = [item for item in records if item["conflicts"]]
     if conflicted:
@@ -1324,6 +1383,448 @@ def _append_grounded_sections(story: list[object], styles, snapshot: dict) -> No
 # Four readers, four documents. One report serving all of them served none of them well: the
 # briefing a station officer needs was buried on page nine, and a court was handed network rankings
 # mixed in with the evidence register as though both were the same kind of statement.
+# Room around the marked place, so a reader sees the line in the sentence it sits in rather than a
+# rectangle of characters floating on white.
+CROP_PADDING = 26
+CROP_MAX_WIDTH = 118 * mm
+CROP_MAX_HEIGHT = 34 * mm
+
+# Enough to make the point without turning a case file into an album. The rest stay openable in the
+# application, where there is no page count to spend.
+MAX_CROPS = 8
+
+
+def _crop_for(db: Session, relation, evidence, output_dir: Path, index: int) -> tuple[Path, tuple[int, int]] | None:
+    """The picture of the place a finding was read from, cut out of the evidence itself.
+
+    Printing "row 2, column a_party" asks a reader to go and look. Printing the row asks nothing of
+    them. For a screenshot this is the pixels the value was read from; for a document it is the
+    band of the page carrying the cited line.
+
+    Returns None for a file that has no picture to cut -- a CSV is already legible as text, and
+    rendering one as an image would be decoration rather than evidence.
+    """
+    from PIL import Image
+
+    from app.services import source_view
+    from app.services.storage import get_private_path
+
+    media = evidence.detected_mime or ""
+    reference = relation.source_reference or {}
+
+    try:
+        if media.startswith("image/"):
+            # The stored reference for an image record covers the whole canvas, so the value has to
+            # do the locating -- and it has to be the value as the source wrote it, not as this
+            # report prints it. A redacted label would be searched for in OCR text that has never
+            # heard of it.
+            subject = db.get(Entity, relation.subject_entity_id)
+            view = source_view.build(
+                db,
+                evidence,
+                target=source_view.Target.from_reference(reference, value=subject.value if subject else None),
+            )
+            marked = [region for region in view.regions if region.cited] or [
+                region for region in view.regions if region.highlight
+            ]
+            if not marked or not view.width or not view.height:
+                return None
+            x0, y0, x1, y1 = marked[0].bbox
+            box = (
+                max(0, int(x0) - CROP_PADDING),
+                max(0, int(y0) - CROP_PADDING),
+                min(view.width, int(x1) + CROP_PADDING),
+                min(view.height, int(y1) + CROP_PADDING),
+            )
+            if box[2] - box[0] < 8 or box[3] - box[1] < 8:
+                return None
+            target = output_dir / f"crop-{index:02d}.png"
+            with Image.open(get_private_path(evidence.storage_key)) as picture:
+                picture.convert("RGB").crop(box).save(target)
+            return target, (box[2] - box[0], box[3] - box[1])
+
+        if media == "application/pdf":
+            import fitz
+
+            page_number = int(reference.get("page") or 1)
+            with fitz.open(get_private_path(evidence.storage_key)) as document:
+                page = document[max(0, min(page_number - 1, document.page_count - 1))]
+                width, height, regions, _count = source_view._pdf_page_marks(
+                    get_private_path(evidence.storage_key), page_number, None, None
+                )
+                # No text to search for here, so the band is taken from the line the reference
+                # names, measured against the rendered page.
+                lines = [
+                    unit
+                    for unit in ((source_view._artifact(db, evidence.id, "units") or {}).get("units") or [])
+                    if (unit.get("reference") or {}).get("line_start") == reference.get("line_start")
+                    and (unit.get("reference") or {}).get("page") == page_number
+                ]
+                if not lines:
+                    return None
+                found = page.search_for(str(lines[0].get("text") or "")[:80])
+                if not found:
+                    return None
+                rect = found[0]
+                clip = fitz.Rect(
+                    max(0, rect.x0 - 14),
+                    max(0, rect.y0 - 10),
+                    min(page.rect.width, rect.x1 + 14),
+                    min(page.rect.height, rect.y1 + 10),
+                )
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(2.4, 2.4), clip=clip)
+                target = output_dir / f"crop-{index:02d}.png"
+                pixmap.save(str(target))
+                return target, (pixmap.width, pixmap.height)
+    except Exception:  # noqa: BLE001 - a crop that will not render must not take the report down
+        logger.info("Could not render a source crop for evidence %s", evidence.id, exc_info=True)
+    return None
+
+
+def _append_source_crops(story: list[object], styles, db: Session, case_id: str, findings: list[dict], output: Path) -> None:
+    """Findings shown at their source, as pictures of the evidence.
+
+    This is the claim this product makes, made visible: not "traceable to page 1, line 6" but the
+    line itself, cut out of the document and printed under the sentence it supports.
+    """
+    relations = {
+        item.id: item
+        for item in db.scalars(select(EntityRelation).where(EntityRelation.case_id == case_id))
+    }
+    evidence = {
+        item.id: item
+        for item in db.scalars(select(EvidenceFile).where(EvidenceFile.case_id == case_id))
+    }
+
+    story.append(PageBreak())
+    story.append(Paragraph("Findings shown at their source", styles["Heading1"]))
+    story.append(
+        Paragraph(
+            "Each image below is cut from the evidence itself, at the place the finding above it was read from. "
+            "Nothing has been redrawn or reconstructed. Where a source is a table or a plain text file it is not "
+            "pictured here, because its cited row or line is already reproduced in full elsewhere in this report.",
+            styles["BodyText"],
+        )
+    )
+    story.append(Spacer(1, 3 * mm))
+
+    shown = 0
+    for finding in findings:
+        if shown >= MAX_CROPS:
+            break
+        relation = relations.get(finding.get("relation_id"))
+        source = evidence.get(relation.source_evidence_id) if relation else None
+        if source is None:
+            continue
+        rendered = _crop_for(db, relation, source, output.parent, shown + 1)
+        if rendered is None:
+            continue
+        path, (pixel_width, pixel_height) = rendered
+        width = min(CROP_MAX_WIDTH, pixel_width * 0.34 * mm)
+        height = max(6 * mm, min(CROP_MAX_HEIGHT, width * (pixel_height / max(pixel_width, 1))))
+
+        story.append(
+            Paragraph(
+                f"<b>{finding['id']}</b> &nbsp; {_safe(finding['statement'])}",
+                styles["BodyText"],
+            )
+        )
+        story.append(
+            Paragraph(
+                f"<font size=7 color='#8a7d71'>{_safe(source.original_name)}"
+                + (f" — {_safe(finding['place'])}" if finding.get("place") else "")
+                + "</font>",
+                styles["BodyText"],
+            )
+        )
+        story.append(Spacer(1, 1.5 * mm))
+        story.append(Image(str(path), width=width, height=height))
+        story.append(Spacer(1, 4 * mm))
+        shown += 1
+
+    if not shown:
+        story.append(
+            Paragraph(
+                "No finding in this case was read from a picture or a document page, so there is nothing to show here. "
+                "Every finding remains openable at its source in the application.",
+                styles["BodyText"],
+            )
+        )
+
+
+# SIH26189 comes from the NCRB Women Safety Division, and the person a case like this is opened for
+# is a node in the graph like any other. Printing a complainant's name across a document that will
+# be copied, mailed and filed is a disclosure the report makes on her behalf every time it is
+# generated, and nothing in the analysis needs it: the network reads identically with the name
+# replaced by a stable label.
+#
+# So the protected reading is the default, and the identified one is a decision somebody makes and
+# the audit log records. That is the right way round for this division's work.
+PROTECTED_LABEL = "Protected person"
+REDACTION_PROFILES = ("protected", "identified")
+
+
+class _Redactor:
+    """Replaces a declared protected identity with a stable label, everywhere it is rendered.
+
+    Only what the case declares can be protected. The system does not guess who a victim is, and a
+    report that silently masked whichever name looked vulnerable would be making an identification
+    of its own while claiming to avoid one.
+
+    The label is stable within a report, so a reader can still follow the same person across
+    sections without being told who she is.
+    """
+
+    def __init__(self, case: dict, profile: str) -> None:
+        self.active = profile != "identified"
+        self._map: dict[str, str] = {}
+        alias = (case.get("victim_alias") or "").strip()
+        if self.active and alias:
+            self._map[alias.casefold()] = f"{PROTECTED_LABEL} A"
+
+    @property
+    def applied(self) -> bool:
+        return self.active and bool(self._map)
+
+    def __call__(self, value: object) -> str:
+        text = "" if value is None else str(value)
+        if not self._map:
+            return text
+        for original, replacement in self._map.items():
+            if original and original in text.casefold():
+                # Rebuilt case-insensitively so "PRIYA SHARMA" in a heading redacts as readily as
+                # the same name in a sentence.
+                index = text.casefold().find(original)
+                while index != -1:
+                    text = text[:index] + replacement + text[index + len(original):]
+                    index = text.casefold().find(original, index + len(replacement))
+        return text
+
+    def walk(self, value):
+        """Apply the redaction to every string in a nested structure.
+
+        Doing this once on the snapshot, rather than at each place a name is printed, is what makes
+        the guarantee checkable. Redacting at render sites means the protection holds only where
+        somebody remembered it, and a protected report that prints the name in one table it forgot
+        is worse than one that never claimed to protect anything.
+        """
+        if not self._map:
+            return value
+        if isinstance(value, str):
+            return self(value)
+        if isinstance(value, dict):
+            return {key: self.walk(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self.walk(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self.walk(item) for item in value)
+        return value
+
+    def note(self) -> str:
+        if not self.active:
+            return (
+                "This report identifies the protected person by name. That was an explicit choice at generation and "
+                "is recorded in the access log."
+            )
+        if not self._map:
+            return (
+                "No protected identity is declared on this case, so nothing has been withheld. Setting the protected "
+                "alias on the case enables this."
+            )
+        return (
+            f"The protected person is shown as “{PROTECTED_LABEL} A” throughout. The identity is held on the case "
+            "record and is not reproduced here."
+        )
+
+
+# What the system can supply towards a certificate, and what it cannot. Section 63 of the Bharatiya
+# Sakshya Adhiniyam 2023 (the provision that replaced section 65B of the Evidence Act) requires a
+# *person* to certify an electronic record -- somebody who occupied a responsible position in
+# relation to the device and can speak to its operation. DRISHYAM cannot occupy that position and
+# does not pretend to. It fills in the particulars it holds and leaves the certification to be
+# signed by the officer who can give it.
+CERTIFICATE_TITLE = "Certificate for electronic evidence"
+CERTIFICATE_BASIS = (
+    "Section 63, Bharatiya Sakshya Adhiniyam 2023 (formerly section 65B, Indian Evidence Act 1872)"
+)
+
+
+def _append_certificate(story: list[object], styles, snapshot: dict, report: Report, evidence_records: list) -> None:
+    """A certificate form, filled in as far as a machine honestly can.
+
+    Every particular below is read from the record. The statement that the system was operating
+    properly is the one thing here that no system can make about itself, so it is left as a
+    declaration for a person to sign rather than printed as though the software had attested to it.
+    """
+    case = snapshot["case"]
+    story.append(PageBreak())
+    story.append(Paragraph(CERTIFICATE_TITLE, styles["Heading1"]))
+    story.append(Paragraph(f"<font size=7 color='#6b6258'>{CERTIFICATE_BASIS}</font>", styles["BodyText"]))
+    story.append(Spacer(1, 3 * mm))
+    story.append(
+        Paragraph(
+            "This form is generated from the record held by DRISHYAM. The particulars in Part A are read from that "
+            "record and are not asserted by any person. Part B is a declaration that only a person occupying a "
+            "responsible position in relation to the device can make, and it is left unsigned here.",
+            styles["BodyText"],
+        )
+    )
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("Part A — Particulars held on record", styles["Heading2"]))
+    particulars = [
+        ("Case reference", _safe(case["number"])),
+        ("FIR number", _safe(case.get("fir_number") or "Not recorded on this case")),
+        ("Report version", f"v{report.version}"),
+        ("Report profile", str(report.profile).replace("_", " ")),
+        ("Electronic records covered", f"{len(evidence_records)} file(s), listed in the evidence register above"),
+        ("Hash algorithm", "SHA-256, computed on each file exactly as received"),
+        ("Produced by", "DRISHYAM evidence intelligence platform"),
+        ("Verification identifier", _safe(_verification_id(report))),
+        ("Generated at", _display_timestamp(utcnow())),
+    ]
+    rows = [[_cell("Particular"), _cell("Recorded value")]] + [[_cell(name), _cell(value)] for name, value in particulars]
+    table = Table(rows, colWidths=[62 * mm, 120 * mm], repeatRows=1)
+    table.setStyle(_report_table_style())
+    story.extend([table, Spacer(1, 4 * mm)])
+
+    story.append(Paragraph("Part B — Declaration to be signed", styles["Heading2"]))
+    for clause in (
+        "The electronic records listed in the evidence register were produced by a computer used regularly to store or "
+        "process information for activities regularly carried on over that period.",
+        "Information of the kind contained in those records was regularly fed into the computer in the ordinary course "
+        "of those activities.",
+        "The computer was operating properly throughout the material part of that period; or, where it was not, any "
+        "respect in which it was not operating properly did not affect the accuracy of the records.",
+        "The information contained in the records reproduces or is derived from information fed into the computer in "
+        "the ordinary course of those activities.",
+    ):
+        story.append(Paragraph("• " + clause, styles["BodyText"]))
+
+    story.append(Spacer(1, 5 * mm))
+    signature = [
+        [_cell("Name and designation"), _cell(" ")],
+        [_cell("Position held in relation to the device"), _cell(" ")],
+        [_cell("Place and date"), _cell(" ")],
+        [_cell("Signature"), _cell(" ")],
+    ]
+    table = Table(signature, colWidths=[70 * mm, 112 * mm], rowHeights=[11 * mm] * 4)
+    table.setStyle(_report_table_style(alternate=False))
+    story.extend([table, Spacer(1, 3 * mm)])
+    story.append(
+        Paragraph(
+            "<font size=7 color='#6b6258'>DRISHYAM does not certify this record. It supplies the particulars above and "
+            "the hashes by which each file can be checked. Admissibility is a matter for the court.</font>",
+            styles["BodyText"],
+        )
+    )
+
+
+def _verification_id(report: Report) -> str:
+    """The same identifier the sealing step issues, computed the same way.
+
+    A report cannot print its own hash -- the hash is of the finished file -- but the identifier
+    that hash is filed under is derived from the case and version, so it can be printed inside.
+    """
+    return f"TRU-{report.case_id[:8].upper()}-R{report.version}"
+
+
+def _append_verification(story: list[object], styles, report: Report, evidence_records: list) -> None:
+    """How a reader checks that this document and its evidence are what they claim to be."""
+    story.append(PageBreak())
+    story.append(Paragraph("Verifying this document", styles["Heading1"]))
+    story.append(
+        Paragraph(
+            f"This report is sealed under verification identifier <b>{_safe(_verification_id(report))}</b>. A manifest "
+            "is written alongside it recording the hash of this file and the hash of every piece of evidence it "
+            "describes. A copy of this report whose hash does not match the manifest is not this report.",
+            styles["BodyText"],
+        )
+    )
+    story.append(Spacer(1, 2 * mm))
+    for step in (
+        "Compute the SHA-256 of this PDF and compare it with the report hash in the manifest issued with it.",
+        "Compute the SHA-256 of any evidence file and compare it with the value recorded against that file below.",
+        "A mismatch on either means the file has changed since this report was generated. It does not by itself say how.",
+    ):
+        story.append(Paragraph("• " + step, styles["BodyText"]))
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("Evidence hash manifest", styles["Heading2"]))
+    rows = [[_cell("File"), _cell("SHA-256")]]
+    for item in evidence_records:
+        rows.append([_cell(_shorten(item.original_name, 44)), _cell(item.sha256 or "not recorded")])
+    if len(rows) == 1:
+        rows.append([_cell("No evidence is held in this case."), _cell("—")])
+    table = Table(rows, colWidths=[70 * mm, 112 * mm], repeatRows=1)
+    table.setStyle(_report_table_style(header="slate"))
+    story.extend([table, Spacer(1, 3 * mm)])
+    story.append(
+        Paragraph(
+            "<font size=7 color='#6b6258'>The report's own hash is issued with the report rather than printed inside "
+            "it: a document cannot contain the hash of itself.</font>",
+            styles["BodyText"],
+        )
+    )
+
+
+def _append_limits(story: list[object], styles, snapshot: dict, *, analytical: bool = True) -> None:
+    """What this document does not establish. Stated plainly, because the omission is load-bearing.
+
+    A report that lists only what it found invites the reader to treat the list as complete. Saying
+    what it cannot support is not a disclaimer bolted on at the end; it is half of what the reader
+    needs in order to use the rest of it correctly.
+    """
+    network = snapshot.get("network") or {}
+    story.append(PageBreak())
+    story.append(Paragraph("What this report does not establish", styles["Heading1"]))
+    story.append(
+        Paragraph(
+            "Everything above is a description of evidence held in this case. None of it is a conclusion about a "
+            "person. In particular:",
+            styles["BodyText"],
+        )
+    )
+    redactor = snapshot.get("redact")
+    if redactor is not None:
+        story.append(Paragraph(f"<font size=7 color='#6b6258'>{_safe(redactor.note())}</font>", styles["BodyText"]))
+        story.append(Spacer(1, 2 * mm))
+    limits = [
+        "It does not establish identity. A name, a number or a handle written in a source is a label; that the same "
+        "label appears twice is a lead for a reviewer, never a finding that the same person is behind both.",
+        "It does not establish intent, agreement or knowledge. The system reads what a source states and does not "
+        "infer what anybody meant by it.",
+        "It does not establish guilt or responsibility.",
+        "It does not establish completeness. Evidence not gathered is not represented here, and an absence in this "
+        "report is an absence of recorded evidence rather than evidence of absence.",
+    ]
+    # A document that carries no analysis should not disclaim analysis. Telling a court what a
+    # network ranking is not, in a document containing no ranking, puts the idea in front of a
+    # reader the annexure was written to keep it away from.
+    if analytical:
+        limits.insert(
+            3,
+            "It does not establish that a connected group is an organisation, and network position is review priority "
+            "rather than any measure of culpability.",
+        )
+        chronology = network.get("chronology") or {}
+        if not chronology.get("incident_window_declared"):
+            limits.append(
+                "No incident window is declared on this case, so nothing here places any contact before or after the "
+                "incident."
+            )
+    for item in limits:
+        story.append(Paragraph("• " + item, styles["BodyText"]))
+    story.append(Spacer(1, 3 * mm))
+    story.append(
+        Paragraph(
+            "<font size=7 color='#6b6258'>Machine-extracted statements that no reviewer has confirmed are marked as "
+            "such throughout. They are readings, not findings.</font>",
+            styles["BodyText"],
+        )
+    )
+
+
 REPORT_PROFILES = ("case_file", "briefing", "court_annexure", "handover")
 
 PROFILE_TITLES = {
@@ -1578,13 +2079,9 @@ def _build_court_annexure(db: Session, report: Report, styles, snapshot: dict, e
     table = Table(rows, colWidths=[36 * mm, 58 * mm, 56 * mm, 32 * mm], repeatRows=1)
     table.setStyle(_report_table_style(header="slate"))
     story.extend([table, Spacer(1, 4 * mm)])
-    story.append(
-        Paragraph(
-            "This annexure and its manifest are sealed together. The verification identifier issued with this document "
-            "can be used to confirm that neither has been altered since it was generated.",
-            styles["BodyText"],
-        )
-    )
+    _append_verification(story, styles, report, evidence_records)
+    _append_certificate(story, styles, snapshot, report, evidence_records)
+    _append_limits(story, styles, snapshot, analytical=False)
     return story
 
 
@@ -1671,7 +2168,13 @@ def generate_report(report_id: str) -> dict:
         report.status = ProcessingState.RUNNING
         db.commit()
         snapshot = _snapshot(db, report.case_id)
-        report.review_snapshot_hash = hashlib.sha256(json.dumps(snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        redactor = _Redactor(snapshot["case"], report.redaction_profile)
+        snapshot = redactor.walk(snapshot)
+        snapshot["redact"] = redactor
+        _ACTIVE_REDACTION.set(redactor if redactor.applied else None)
+        report.review_snapshot_hash = hashlib.sha256(
+            json.dumps({key: value for key, value in snapshot.items() if key != "redact"}, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
         case_record = db.get(Case, report.case_id)
         if not case_record:
             raise ValueError("Case not found")
@@ -1710,7 +2213,7 @@ def generate_report(report_id: str) -> dict:
         # A profile other than the full case file is a different document for a different reader,
         # not a filtered version of this one, so it is written rather than trimmed.
         if report.profile in {"briefing", "court_annexure", "handover"}:
-            findings = _numbered_findings(db, report.case_id, snapshot)
+            findings = _numbered_findings(db, report.case_id, snapshot, redactor)
             if report.profile == "briefing":
                 profile_story = _build_briefing(db, report, styles, snapshot, findings)
             elif report.profile == "handover":
@@ -1721,8 +2224,9 @@ def generate_report(report_id: str) -> dict:
 
         entities_by_type = Counter(label for item in entity_records if (label := _entity_display(item.entity_type)))
         alerts_by_severity = Counter(item.severity.value for item in alert_records)
-        entity_chart = _render_bar_chart(output.parent / f"{output.stem}-entities.png", "Extracted entities by type", list(entities_by_type), list(entities_by_type.values()), "#59636a", "Entities")
-        alert_donut = _render_donut(output.parent / f"{output.stem}-alerts.png", "Alert severity distribution", alerts_by_severity)
+        # A bar chart of eight entities and a donut of two alerts is decoration. The entity-class
+        # table and the alert list say the same thing in a fraction of the space, and say it
+        # exactly. The transaction chart stays: an amount over time is a shape worth seeing.
         transaction_chart = _render_bar_chart(output.parent / f"{output.stem}-transactions.png", "Transaction amount by event / time", [(item.reference_id or (_display_timestamp(item.occurred_at) if item.occurred_at else "Unknown"))[-18:] for item in transaction_records], [float(item.amount) for item in transaction_records], "#b17a2d", "INR")
         story = [Spacer(1, 42 * mm), Paragraph("DRISHYAM", styles["Cover"]), Paragraph("Criminal Network Analysis Report", ParagraphStyle(name="CoverSub", parent=styles["Heading2"], alignment=TA_CENTER, textColor=CHARCOAL, spaceAfter=10 * mm)), Spacer(1, 7 * mm)]
         case = snapshot["case"]
@@ -1737,7 +2241,7 @@ def generate_report(report_id: str) -> dict:
         report_identification = [[_cell("Field"), _cell("Value"), _cell("Field"), _cell("Value")], [_cell("Report ID"), _cell(report.id), _cell("Case ID"), _cell(case["number"])], [_cell("Report version"), _cell(f"v{report.version}"), _cell("Snapshot record"), _cell("Current case-scoped backend snapshot")], [_cell("Generated timestamp"), _cell(_display_timestamp(utcnow())), _cell("Processing version"), _cell("DRISHYAM evidence pipeline")], [_cell("Reviewer / owner"), _cell("Authorized investigator workflow"), _cell("Report integrity"), _cell("Verification receipt generated on completion")]]
         identification_table = Table(report_identification, colWidths=[32 * mm, 59 * mm, 34 * mm, 57 * mm], repeatRows=1)
         identification_table.setStyle(_report_table_style(header="burgundy", padded=3.5))
-        story.extend([Paragraph("Report identification", styles["Heading1"]), identification_table, Spacer(1, 6 * mm), Paragraph("Executive summary", styles["Heading1"]), Paragraph("This summary shows the evidence, timeline, transactions, alerts, and review decisions currently recorded for the case.", styles["BodyText"]), Spacer(1, 3 * mm)])
+        story.extend([Paragraph("Report identification", styles["Heading2"]), identification_table, Spacer(1, 5 * mm), Paragraph("Executive summary", styles["Heading1"]), Paragraph("This summary shows the evidence, timeline, transactions, alerts, and review decisions currently recorded for the case.", styles["BodyText"]), Spacer(1, 3 * mm)])
         metrics = [
             [_cell("Evidence\n" + str(len(snapshot["evidence"]))), _cell("Entities\n" + str(db.scalar(select(func.count(Entity.id)).where(Entity.case_id == report.case_id)) or 0)), _cell("Timeline events\n" + str(len(snapshot["events"]))), _cell("Transactions\n" + str(len(snapshot["transactions"]))), _cell("Reviewable alerts\n" + str(len(snapshot["alerts"])))],
             [_cell("Claims\n" + str(len(claim_records))), _cell("Contradictions\n" + str(len(contradiction_records))), _cell("Review decisions\n" + str(len(snapshot["reviews"]))), _cell("Open alerts\n" + str(sum(1 for item in alert_records if item.status.value != "reviewed"))), _cell("Report version\n" + str(report.version))],
@@ -1750,11 +2254,6 @@ def generate_report(report_id: str) -> dict:
         table = Table(evidence_table, colWidths=[52 * mm, 100 * mm, 30 * mm], repeatRows=1)
         table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 5)]))
         story.extend([table])
-        story.extend([PageBreak(), Paragraph("Entity and alert analytics", styles["Heading1"])])
-        if entity_chart:
-            story.append(Image(str(entity_chart), width=178 * mm, height=84 * mm))
-        if alert_donut:
-            story.extend([Spacer(1, 3 * mm), Image(str(alert_donut), width=100 * mm, height=86 * mm)])
         known_events = [item for item in snapshot["events"] if item["time"]]
         # An event with a clock reading but no date cannot be placed in the chronology, yet the
         # reading itself is real and belongs in the report rather than being flattened into
@@ -1767,20 +2266,28 @@ def generate_report(report_id: str) -> dict:
         overview_table = Table(overview, colWidths=[42 * mm, 94 * mm, 46 * mm], repeatRows=1)
         overview_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("PADDING", (0, 0), (-1, -1), 4)]))
         story.extend([overview_table, Spacer(1, 5 * mm), Paragraph("Detailed source-linked chronology", styles["Heading2"])])
-        for item in known_events[:80]:
+        for item in known_events[:TIMELINE_DETAIL_LIMIT]:
             time_label = _display_event_timestamp(item)
-            story.append(Paragraph(f"<b>{_safe(time_label)}</b> — {_safe(item['type'])} ({_safe(item['review'])}): {_safe(item['description'])}", styles["BodyText"]))
+            story.append(Paragraph(f"<b>{_safe(time_label)}</b> — {_safe(item['type'])} ({_safe(item['review'])}): {_safe(_shorten(item['description'], 260))}", styles["BodyText"]))
             story.append(Spacer(1, 1.5 * mm))
+        if (note := _omission_note(TIMELINE_DETAIL_LIMIT, len(known_events), "dated record(s)")):
+            story.append(Paragraph(note, styles["BodyText"]))
         if partial_events:
             story.extend([Spacer(1, 4 * mm), Paragraph("Time of day observed, date not established", styles["Heading2"]), Paragraph("The source shows a clock reading but never states which day it belongs to, so these records are not placed in the chronology above.", styles["BodyText"])])
-            for item in partial_events:
-                story.append(Paragraph(f"<b>{_safe(_display_event_timestamp(item))}</b> — {_safe(item['type'])} ({_safe(item['review'])}): {_safe(_shorten(item['description'], 400))}", styles["BodyText"]))
+            for item in partial_events[:UNDATED_DETAIL_LIMIT]:
+                story.append(Paragraph(f"<b>{_safe(_display_event_timestamp(item))}</b> — {_safe(item['type'])} ({_safe(item['review'])}): {_safe(_shorten(item['description'], 220))}", styles["BodyText"]))
                 story.append(Spacer(1, 1.5 * mm))
+            if (note := _omission_note(UNDATED_DETAIL_LIMIT, len(partial_events), "record(s) with a clock reading only")):
+                story.append(Paragraph(note, styles["BodyText"]))
         if unknown_events:
-            story.extend([PageBreak(), Paragraph("Time not established", styles["Heading1"]), Paragraph("The following source-linked records are retained but are not presented as exact chronology.", styles["BodyText"])])
-            for item in unknown_events:
-                story.append(Paragraph(f"<b>{_safe(item['type'])}</b> ({_safe(item['review'])}): {_safe(_shorten(item['description'], 400))}", styles["BodyText"]))
+            # These were reprinting the whole source text of every undated record, which the
+            # grounded table below then reprinted again. The count is the finding; the text is not.
+            story.extend([Spacer(1, 4 * mm), Paragraph("Time not established", styles["Heading2"]), Paragraph(f"{len(unknown_events)} source-linked record(s) carry no time at all. They are retained and are not presented as chronology; a case with many of these is a case whose chronology should not be leaned on.", styles["BodyText"])])
+            for item in unknown_events[:UNDATED_DETAIL_LIMIT]:
+                story.append(Paragraph(f"<b>{_safe(item['type'])}</b> ({_safe(item['review'])}): {_safe(_shorten(item['description'], 200))}", styles["BodyText"]))
                 story.append(Spacer(1, 1.5 * mm))
+            if (note := _omission_note(UNDATED_DETAIL_LIMIT, len(unknown_events), "untimed record(s)")):
+                story.append(Paragraph(note, styles["BodyText"]))
         graph_image, graph_metrics = _render_connection_graph(db, report.case_id, output)
         lineage_metrics = build_case_graph(db, report.case_id)["metrics"]
         graph_metrics = {**lineage_metrics, **graph_metrics}
@@ -1798,6 +2305,7 @@ def generate_report(report_id: str) -> dict:
         # establishes. It was written after this report was, and until now the report described a
         # cyber-fraud case that this product had stopped being.
         _append_network_sections(story, styles, snapshot)
+        _append_limits(story, styles, snapshot)
 
         # "Documented amount" read as a loss figure, which is not what the arithmetic produces. The
         # sum counts a balance quoted in a message beside a payment recorded on a receipt, and counts
@@ -1925,9 +2433,14 @@ def generate_report(report_id: str) -> dict:
             story.append(review_render)
         else:
             story.append(Paragraph("No investigator review decision has been recorded against this case yet.", styles["BodyText"]))
-        custody = [[_cell("Time"), _cell("Actor"), _cell("Action"), _cell("Result")]]
-        custody += [[_timestamp_cell(item.created_at), _cell(item.actor_id or "System"), _cell(item.action), _cell(item.outcome)] for item in audit_rows]
-        custody_table = Table(custody, colWidths=[32 * mm, 38 * mm, 58 * mm, 54 * mm], repeatRows=1)
+        # Two pages of "actor ccd00848-fdc5-… · grounded.assistant_question · success" is not what
+        # an investigator opens a case file for, and it is already in the court annexure, which is
+        # the document that exists to be examined that way. What stays here is the count, because
+        # the fact that the record is kept matters even when the rows do not.
+        custody = [[_cell("Access record"), _cell("Held")]]
+        custody += [[_cell("Actions recorded against this case"), _cell(f"{len(audit_rows)}, append-only")]]
+        custody += [[_cell("Full log"), _cell("Reproduced in the court annexure profile of this report")]]
+        custody_table = Table(custody, colWidths=[80 * mm, 102 * mm], repeatRows=1)
         custody_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4)]))
         story.extend([Spacer(1, 6 * mm), Paragraph("Evidence and review log", styles["Heading2"]), custody_table])
         # The processing manifest continues on the same page. Removing "Case record overview" left a
@@ -1939,8 +2452,10 @@ def generate_report(report_id: str) -> dict:
         manifest_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4)]))
         story.extend([PageBreak(), Paragraph("Key findings and review", styles["Heading1"]), Paragraph("The following observations should be considered with their listed source and review state.", styles["BodyText"]), Paragraph("Evidence-linked findings", styles["Heading2"])])
         story.append(Paragraph("Numbered findings", styles["Heading2"]))
-        _append_numbered_findings(story, styles, _numbered_findings(db, report.case_id, snapshot))
+        numbered = _numbered_findings(db, report.case_id, snapshot, redactor)
+        _append_numbered_findings(story, styles, numbered)
         story.append(Spacer(1, 5 * mm))
+        _append_source_crops(story, styles, db, report.case_id, numbered, output)
         findings = [event for event in snapshot["events"] if event["review"] == "confirmed"][:5]
         finding_rows = [[_cell("Finding / event"), _cell("Supporting source"), _cell("Review state")]]
         if findings:
@@ -1950,10 +2465,21 @@ def generate_report(report_id: str) -> dict:
             finding_rows.append([_cell("No event is presented as a final finding until a human review decision confirms it."), _cell("—"), _cell("Review required")])
         finding_table = Table(finding_rows, colWidths=[102 * mm, 42 * mm, 38 * mm], repeatRows=1)
         finding_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4), ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#fbf5ec"))]))
-        gap_rows = [[_cell("Severity"), _cell("Reviewable lead"), _cell("Status")]] + [[_cell(item.severity.value.upper()), _cell(item.explanation), _cell(item.status.value)] for item in alert_records]
+        # These were the same alert records the "Rule-based alerts" section above already prints,
+        # under a second heading. One list, once. What belongs here instead is the gaps -- the
+        # things the case is missing, which no other section states.
+        gap_rows = [[_cell("Gap"), _cell("Consequence")]]
+        if any(item["time"] is None for item in snapshot["events"]):
+            gap_rows.append([_cell("Records with no established time"), _cell("They cannot be placed in the chronology and are excluded from it.")])
+        if any(not item.sender_value or not item.receiver_value for item in transaction_records):
+            gap_rows.append([_cell("Transactions with an unresolved party"), _cell("A transfer is recorded but one end of it is not established.")])
+        if contradiction_records:
+            gap_rows.append([_cell(f"{len(contradiction_records)} recorded contradiction(s)"), _cell("Two sources disagree and neither has been preferred.")])
+        if not snapshot.get("reviews"):
+            gap_rows.append([_cell("No human review decision"), _cell("Every statement in this report is a machine reading that nobody has confirmed.")])
         if len(gap_rows) == 1:
-            gap_rows.append([_cell("—"), _cell("No alert record is currently present in this case snapshot."), _cell("—")])
-        gap_table = Table(gap_rows, colWidths=[25 * mm, 125 * mm, 32 * mm], repeatRows=1)
+            gap_rows.append([_cell("None identified"), _cell("No structural gap is indicated by the current case snapshot.")])
+        gap_table = Table(gap_rows, colWidths=[62 * mm, 120 * mm], repeatRows=1)
         gap_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#3d4952")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4), ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#fbf5ec"))]))
         recommendations = []
         if any(item.status.value != "reviewed" for item in alert_records):
@@ -1981,6 +2507,7 @@ def generate_report(report_id: str) -> dict:
             db.commit()
         raise
     finally:
+        _ACTIVE_REDACTION.set(None)
         db.close()
 
 
