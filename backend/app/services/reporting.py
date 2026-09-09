@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import utcnow
-from app.models.entities import Alert, AuditLog, Case, Claim, Contradiction, Entity, Event, EvidenceFile, NormalizedRecord, ProcessingRun, ProcessingState, RecordRelation, Report, ReviewDecision, Transaction
+from app.models.entities import Alert, AuditLog, Case, Claim, Contradiction, Entity, EntityOccurrence, EntityRelation, Event, EvidenceFile, NormalizedRecord, ProcessingRun, ProcessingState, RecordRelation, Report, ReviewDecision, Transaction
 from app.graph.projection import build_case_graph
 from app.graph.connections import build_connection_graph, describe_connections
 from app.services.storage import get_report_artifact_path, publish_private_file, report_storage_key
@@ -109,6 +109,108 @@ def _unique_relations(relations: list) -> list:
     return unique
 
 
+# The entity classes SIH26189 names, in the order a reader thinks about them: who, then what they
+# moved in, then where, then under whose name.
+NETWORK_ENTITY_CLASSES = (
+    ("person", "People named"),
+    ("vehicle", "Vehicles"),
+    ("location", "Places"),
+    ("organisation", "Organisations"),
+    ("phone", "Phone numbers"),
+    ("upi", "UPI handles"),
+    ("account", "Accounts"),
+    ("email", "Email addresses"),
+    ("reference", "Transaction references"),
+)
+
+
+# The wider report calls both a person and an unclassified counterparty a "Named party", which is
+# the cautious reading it wants elsewhere. Inside the network sections that reads as a contradiction
+# against a class table saying "People named", so these sections use one vocabulary throughout.
+NETWORK_CLASS_LABELS = {
+    "person": "Person",
+    "party": "Named counterparty",
+    "vehicle": "Vehicle",
+    "location": "Place",
+    "organisation": "Organisation",
+    "phone": "Phone",
+    "upi": "UPI handle",
+    "account": "Account",
+    "email": "Email",
+    "reference": "Transaction reference",
+}
+
+
+def _network_label(entity_type: object) -> str:
+    key = str(entity_type or "")
+    return NETWORK_CLASS_LABELS.get(key) or _entity_display(key) or key.replace("_", " ").title()
+
+
+def _network_snapshot(db: Session, case_id: str) -> dict:
+    """What the criminal-network layer knows about this case.
+
+    The report was written before this layer existed and still described a cyber-fraud case: it
+    could name the files that shared an identifier but not the people, vehicles and places the
+    problem statement is actually about, nor who sits where in the network between them.
+
+    Every figure here is read back from the same functions the live views use, so a printed report
+    and the screen it was printed from cannot disagree.
+    """
+    from app.graph import analytics
+    from app.services import temporal
+
+    entities = db.scalars(select(Entity).where(Entity.case_id == case_id)).all()
+    relations = db.scalars(select(EntityRelation).where(EntityRelation.case_id == case_id)).all()
+
+    classes = Counter(item.entity_type for item in entities)
+    # Distinct evidence files, not occurrence rows. One file can record the same identity in
+    # several fields, and counting those made a number appear in more files than the case holds.
+    occurrences = Counter(
+        row[0]
+        for row in db.execute(
+            select(EntityOccurrence.entity_id, EntityOccurrence.evidence_id)
+            .where(EntityOccurrence.case_id == case_id)
+            .distinct()
+        )
+    )
+    labels = {item.id: item.value for item in entities}
+    types = {item.id: item.entity_type for item in entities}
+
+    # An identity written in several files and resolved to one node is the thing this product
+    # exists to do, so it is reported as a figure rather than left for a reader to infer.
+    across_sources = sorted(
+        (
+            {"label": labels.get(entity_id, "?"), "type": types.get(entity_id, "?"), "sources": count}
+            for entity_id, count in occurrences.items()
+            if count > 1
+        ),
+        key=lambda item: (-item["sources"], item["label"]),
+    )
+
+    traced = sum(1 for item in relations if item.source_evidence_id and item.source_reference)
+    chronology = temporal.case_chronology(db, case_id)
+
+    return {
+        "overview": analytics.network_overview(db, case_id),
+        "ranked": analytics.important_entities(db, case_id, limit=8),
+        "bridges": analytics.bridge_relationships(db, case_id),
+        "communities": analytics.communities(db, case_id),
+        "classes": [(label, classes.get(key, 0)) for key, label in NETWORK_ENTITY_CLASSES if classes.get(key)],
+        "entity_total": len(entities),
+        "relation_total": len(relations),
+        "across_sources": across_sources[:10],
+        "traceability": {
+            "traced": traced,
+            "total": len(relations),
+            "percent": round((traced / len(relations)) * 100, 1) if relations else 100.0,
+        },
+        "chronology": chronology,
+        "pre_incident": temporal.pre_incident_contacts(db, case_id)[:6],
+        "bursts": temporal.communication_bursts(db, case_id)[:6],
+        "labels": labels,
+    }
+
+
 def _snapshot(db: Session, case_id: str) -> dict:
     case = db.get(Case, case_id)
     if not case:
@@ -171,6 +273,7 @@ def _snapshot(db: Session, case_id: str) -> dict:
             }
             for item in grounded
         ],
+        "network": _network_snapshot(db, case_id),
         "connections": describe_connections(db, case_id),
         "connection_summary": build_connection_graph(db, case_id)["summary"],
         "candidate_relations": [
@@ -406,10 +509,10 @@ def _draw_report_frame(canvas, doc) -> None:
     if canvas.getPageNumber() > 1:
         canvas.setFont("Helvetica-Bold", 6.2)
         canvas.setFillColor(BURGUNDY)
-        canvas.drawString(14 * mm, height - 8 * mm, "DRISHYAM  /  DIGITAL EVIDENCE INVESTIGATION REPORT")
+        canvas.drawString(14 * mm, height - 8 * mm, "DRISHYAM  /  CRIMINAL NETWORK ANALYSIS REPORT")
     canvas.setFont("Helvetica", 6.1)
     canvas.setFillColor(colors.HexColor("#756f68"))
-    canvas.drawString(14 * mm, 8.3 * mm, "DRISHYAM — DIGITAL EVIDENCE INVESTIGATION REPORT")
+    canvas.drawString(14 * mm, 8.3 * mm, "DRISHYAM — CRIMINAL NETWORK ANALYSIS REPORT")
     canvas.drawRightString(width - 14 * mm, 8.3 * mm, f"Page {canvas.getPageNumber()}")
     canvas.restoreState()
 
@@ -742,6 +845,235 @@ _BASIS_LABEL = {
 }
 
 
+def _append_network_sections(story: list[object], styles, snapshot: dict) -> None:
+    """The criminal network: who is in it, who holds it together, and what it does not establish.
+
+    House rule, the same one the live view follows: a centrality score is never printed on its own.
+    Every ranked entity carries the sentence explaining why it ranked and the caveat saying what the
+    ranking is not. A number beside a person's name, alone on a page that will be read by somebody
+    deciding whether to act on it, invites exactly the reading this system must not support.
+    """
+    network = snapshot.get("network") or {}
+    overview = network.get("overview") or {}
+    ranked = network.get("ranked") or []
+
+    story.extend([PageBreak(), Paragraph("Criminal network analysis", styles["Heading1"])])
+
+    entity_total = network.get("entity_total", 0)
+    relation_total = network.get("relation_total", 0)
+
+    if not relation_total:
+        story.append(
+            Paragraph(
+                f"This case records {entity_total} resolved identit{'y' if entity_total == 1 else 'ies'} but no stated "
+                "relationship between any two of them, so no network can be described. That is an absence of recorded "
+                "evidence, not evidence that no network exists.",
+                styles["BodyText"],
+            )
+        )
+        return
+
+    bridges = network.get("bridges") or []
+    story.append(
+        Paragraph(
+            f"The evidence in this case states <b>{relation_total}</b> relationship observation(s) between "
+            f"<b>{overview.get('entities', 0)}</b> identities, forming <b>{overview.get('communities', 0)}</b> connected "
+            f"group(s). <b>{len(bridges)}</b> of those relationships are the only link between two parts of the network: "
+            "if one of them is wrong, the connection it carries does not exist. Everything below was read from a source "
+            "and can be opened at the row, line or image region it came from.",
+            styles["BodyText"],
+        )
+    )
+    story.append(Spacer(1, 4 * mm))
+
+    # ----------------------------------------------------------------- what was found, by class
+    classes = network.get("classes") or []
+    if classes:
+        story.append(Paragraph("Entities recorded, by class", styles["Heading2"]))
+        rows = [[_cell("Class"), _cell("Recorded")]] + [[_cell(label), _cell(str(count))] for label, count in classes]
+        table = Table(rows, colWidths=[95 * mm, 40 * mm], hAlign="LEFT")
+        table.setStyle(_report_table_style())
+        story.extend([table, Spacer(1, 3 * mm)])
+        story.append(
+            Paragraph(
+                "<font size=7 color='#6b6258'>A name, a place or an organisation is recorded because a source wrote it "
+                "down. Recording it does not establish that the person, place or body behind the name is the one named "
+                "elsewhere.</font>",
+                styles["BodyText"],
+            )
+        )
+        story.append(Spacer(1, 4 * mm))
+
+    # ----------------------------------------------------------------- one identity, several files
+    across = network.get("across_sources") or []
+    if across:
+        story.append(Paragraph("Identities appearing in more than one source", styles["Heading2"]))
+        story.append(
+            Paragraph(
+                "Each of these was written in several files and resolved to a single identity. This is what allows the "
+                "files to be read together at all; it is not, by itself, proof that one person is behind them.",
+                styles["BodyText"],
+            )
+        )
+        rows = [[_cell("Identity"), _cell("Type"), _cell("Evidence files")]]
+        rows += [[_cell(_shorten(item["label"], 46)), _cell(_network_label(item["type"])), _cell(str(item["sources"]))] for item in across]
+        table = Table(rows, colWidths=[80 * mm, 45 * mm, 30 * mm], hAlign="LEFT")
+        table.setStyle(_report_table_style())
+        story.extend([table, Spacer(1, 4 * mm)])
+
+    # ----------------------------------------------------------------- network position
+    if ranked:
+        story.append(Paragraph("Network position / review priority, not guilt", styles["Heading2"]))
+        story.append(
+            Paragraph(
+                f"Ranked by {str(ranked[0].get('metric', 'betweenness_centrality')).replace('_', ' ')}, which answers "
+                "who connects parts of the network that would otherwise be separate — the investigative question — "
+                "rather than who simply appears most often.",
+                styles["BodyText"],
+            )
+        )
+        story.append(Spacer(1, 2 * mm))
+        for entry in ranked:
+            story.append(
+                Paragraph(
+                    f"<b>#{entry.get('rank')} &nbsp; {_safe(_shorten(entry.get('label'), 52))}</b> "
+                    f"<font size=7 color='#8a7d71'>({_network_label(entry.get('entity_type'))} · "
+                    f"score {float(entry.get('score', 0)):.3f} · {entry.get('supporting_evidence_count', 0)} evidence file(s))</font>",
+                    styles["BodyText"],
+                )
+            )
+            story.append(Paragraph(_safe(entry.get("why")), styles["BodyText"]))
+            story.append(Paragraph("<font size=7 color='#6b6258'>" + _safe(entry.get("caveat")) + "</font>", styles["BodyText"]))
+            story.append(Spacer(1, 2 * mm))
+
+    # ----------------------------------------------------------------- the fragile links
+    if bridges:
+        story.append(PageBreak())
+        story.append(Paragraph("Relationships to verify first", styles["Heading2"]))
+        story.append(
+            Paragraph(
+                "Each of these is the only path between two parts of this network. They are listed first not because "
+                "they are the most incriminating but because they are the most load-bearing: if one is a misreading, "
+                "everything it joins comes apart.",
+                styles["BodyText"],
+            )
+        )
+        rows = [[_cell("Relationship"), _cell("Stated as"), _cell("Records"), _cell("Sources")]]
+        for item in bridges[:12]:
+            subject = _shorten((item.get("subject") or {}).get("label"), 30)
+            target = _shorten((item.get("object") or {}).get("label"), 30)
+            rows.append([
+                _cell(f"{subject} — {target}"),
+                _cell(", ".join(str(value).replace("_", " ").title() for value in item.get("relation_types") or [])),
+                _cell(str(item.get("observations", 0))),
+                _cell(str(item.get("supporting_evidence_count", 0))),
+            ])
+        table = Table(rows, colWidths=[70 * mm, 45 * mm, 20 * mm, 20 * mm], hAlign="LEFT")
+        table.setStyle(_report_table_style())
+        story.extend([table, Spacer(1, 4 * mm)])
+
+    # ----------------------------------------------------------------- groups
+    communities = network.get("communities") or []
+    if communities:
+        story.append(Paragraph("Connected groups / a pattern, not an organisation", styles["Heading2"]))
+        story.append(
+            Paragraph(
+                "A group below is a set of identities more connected to each other than to the rest of the case. It is "
+                "a shape in the evidence gathered so far. It is not a finding that an organisation exists.",
+                styles["BodyText"],
+            )
+        )
+        for item in communities:
+            members = ", ".join(_shorten((member or {}).get("label"), 28) for member in (item.get("members") or [])[:8])
+            story.append(
+                Paragraph(
+                    f"<b>Group {item.get('community_id')}</b> <font size=7 color='#8a7d71'>({item.get('size', 0)} identities · "
+                    f"{item.get('supporting_evidence_count', 0)} evidence file(s))</font><br/>{_safe(members)}",
+                    styles["BodyText"],
+                )
+            )
+        story.append(Spacer(1, 4 * mm))
+
+    # ----------------------------------------------------------------- around the incident
+    chronology = network.get("chronology") or {}
+    story.append(Paragraph("Contact around the declared incident", styles["Heading2"]))
+    if not chronology.get("incident_window_declared"):
+        story.append(
+            Paragraph(
+                "No incident window is declared on this case, so recorded contact cannot be placed before or after it. "
+                "Setting the incident date on the case enables this reading.",
+                styles["BodyText"],
+            )
+        )
+    else:
+        placed = chronology.get("contacts_placed") or {}
+        story.append(
+            Paragraph(
+                f"Of the contact this case records, <b>{placed.get('before', 0)}</b> occurred before the declared "
+                f"incident window, <b>{placed.get('during', 0)}</b> during it and <b>{placed.get('after', 0)}</b> after."
+                + (
+                    " Some recorded contact could not be placed at all, because the source never established a time; "
+                    "a chronology with that much missing should not be leaned on."
+                    if chronology.get("contacts_without_established_time")
+                    else ""
+                )
+                + " Contact before an incident is not evidence of involvement in it.",
+                styles["BodyText"],
+            )
+        )
+        pre = network.get("pre_incident") or []
+        if pre:
+            story.append(Spacer(1, 3 * mm))
+            rows = [[_cell("Between"), _cell("Contacts"), _cell("Hours before")]]
+            for item in pre:
+                pair = item.get("pair") or []
+                rows.append([
+                    _cell(" — ".join(_shorten(name, 26) for name in pair)),
+                    _cell(str(item.get("contacts", 0))),
+                    _cell(f"{float(item.get('hours_before', 0)):.1f}"),
+                ])
+            table = Table(rows, colWidths=[85 * mm, 25 * mm, 30 * mm], hAlign="LEFT")
+            table.setStyle(_report_table_style())
+            story.extend([table, Spacer(1, 3 * mm)])
+
+    bursts = network.get("bursts") or []
+    if bursts:
+        story.append(Paragraph("Concentrated communication", styles["Heading2"]))
+        rows = [[_cell("Between"), _cell("Contacts"), _cell("Within (minutes)")]]
+        for item in bursts:
+            pair = item.get("pair") or []
+            rows.append([
+                _cell(" — ".join(_shorten(name, 26) for name in pair)),
+                _cell(str(item.get("contacts", 0))),
+                _cell(str(int(item.get("minutes", 0)))),
+            ])
+        table = Table(rows, colWidths=[85 * mm, 25 * mm, 30 * mm], hAlign="LEFT")
+        table.setStyle(_report_table_style())
+        story.extend([table, Spacer(1, 3 * mm)])
+        story.append(
+            Paragraph(
+                "<font size=7 color='#6b6258'>A concentration of contact is a pattern worth asking about. It is not a "
+                "finding about what was discussed.</font>",
+                styles["BodyText"],
+            )
+        )
+
+    # ----------------------------------------------------------------- the headline claim, measured
+    traceability = network.get("traceability") or {}
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("Traceability of this network", styles["Heading2"]))
+    story.append(
+        Paragraph(
+            f"<b>{traceability.get('percent', 0)}%</b> of the {traceability.get('total', 0)} relationship observation(s) "
+            f"above name both the evidence file they were read from and the exact place inside it "
+            f"({traceability.get('traced', 0)} of {traceability.get('total', 0)}). This is enforced when the record is "
+            "written, not audited afterwards: a relationship with no source cannot be stored, so this figure is a "
+            "property of the system rather than a claim about this case.",
+            styles["BodyText"],
+        )
+    )
+
+
 def _grounded_field(value: object, basis: str) -> str:
     """Render a field so an inference can never be mistaken for an observation."""
     if value in (None, "", []):
@@ -909,7 +1241,7 @@ def generate_report(report_id: str) -> dict:
         entity_chart = _render_bar_chart(output.parent / f"{output.stem}-entities.png", "Extracted entities by type", list(entities_by_type), list(entities_by_type.values()), "#59636a", "Entities")
         alert_donut = _render_donut(output.parent / f"{output.stem}-alerts.png", "Alert severity distribution", alerts_by_severity)
         transaction_chart = _render_bar_chart(output.parent / f"{output.stem}-transactions.png", "Transaction amount by event / time", [(item.reference_id or (_display_timestamp(item.occurred_at) if item.occurred_at else "Unknown"))[-18:] for item in transaction_records], [float(item.amount) for item in transaction_records], "#b17a2d", "INR")
-        story = [Spacer(1, 42 * mm), Paragraph("DRISHYAM", styles["Cover"]), Paragraph("Digital Evidence Investigation Report", ParagraphStyle(name="CoverSub", parent=styles["Heading2"], alignment=TA_CENTER, textColor=CHARCOAL, spaceAfter=10 * mm)), Spacer(1, 7 * mm)]
+        story = [Spacer(1, 42 * mm), Paragraph("DRISHYAM", styles["Cover"]), Paragraph("Criminal Network Analysis Report", ParagraphStyle(name="CoverSub", parent=styles["Heading2"], alignment=TA_CENTER, textColor=CHARCOAL, spaceAfter=10 * mm)), Spacer(1, 7 * mm)]
         case = snapshot["case"]
         cover = Table([
             [_cell("Case ID"), _cell("Crime type"), _cell("Priority"), _cell("Investigation status")],
@@ -977,6 +1309,12 @@ def generate_report(report_id: str) -> dict:
         # The graph shows the links; this says what they are in words. Separating them meant the
         # picture arrived on one page and its explanation on another.
         _append_connection_section(story, styles, snapshot)
+
+        # The connection section says which files share a value. This says what network those
+        # shared values describe -- who is in it, who holds it together, and what none of it
+        # establishes. It was written after this report was, and until now the report described a
+        # cyber-fraud case that this product had stopped being.
+        _append_network_sections(story, styles, snapshot)
 
         # "Documented amount" read as a loss figure, which is not what the arithmetic produces. The
         # sum counts a balance quoted in a message beside a payment recorded on a receipt, and counts
