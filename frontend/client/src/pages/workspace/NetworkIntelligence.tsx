@@ -283,6 +283,7 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
       target: targetFromReference(relation.source_reference, label),
       title: label,
       subtitle: "Opened at the first evidence that states a relationship for this entity",
+      entityId,
     });
   };
 

@@ -57,7 +57,7 @@ from app.schemas.grounded import (
 )
 from app.core.security import utcnow
 from app.graph import analytics
-from app.services import case_assistant, record_review, relationship_builder, temporal
+from app.services import case_assistant, entity_summary, record_review, relationship_builder, temporal
 from app.services.audit import audit
 from app.services.cases import require_case_access
 from app.services.grounded_pipeline import GROUNDED_PIPELINE_VERSION, UI_STAGE_ORDER
@@ -717,6 +717,21 @@ def communication_bursts(case_id: str, current_user: CurrentUser, db: DbSession)
 
 
 # --------------------------------------------------------------------------- case assistant
+
+
+@router.get("/entities/{entity_id}/summary")
+def read_entity_summary(case_id: str, entity_id: str, current_user: CurrentUser, db: DbSession) -> dict:
+    """Who this identity is, why it is in the case, and what it is not connected to.
+
+    Assembled from stored rows rather than written, so every sentence carries the file and the
+    place it was read from and the whole card can be checked line by line. No language model is
+    involved, which is also why nothing about the case leaves this machine to produce it.
+    """
+    require_case_access(db, case_id, current_user)
+    summary = entity_summary.build(db, case_id, entity_id)
+    if summary is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity not found in this case")
+    return summary.to_dict()
 
 
 @router.post("/assistant/ask", response_model=CaseAssistantResponse)

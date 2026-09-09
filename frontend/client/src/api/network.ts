@@ -33,3 +33,26 @@ export async function getNetworkSubgraph(caseId: string, entityId: string, hops 
 export async function getEntityRelations(caseId: string, params: { relation_type?: string; entity_id?: string; verification_status?: string; limit?: number; offset?: number } = {}): Promise<EntityRelationPage> { return (await apiClient.get(`${base(caseId)}/entity-relations`, { params })).data; }
 export async function getEntityRelationSummary(caseId: string): Promise<EntityRelationSummaryRecord[]> { return (await apiClient.get(`${base(caseId)}/entity-relations/summary`)).data; }
 export async function reviewEntityRelation(caseId: string, relationId: string, action: "confirm_relationship" | "reject_relationship", reason?: string): Promise<EntityRelationRecord> { return (await apiClient.post(`${base(caseId)}/entity-relations/${relationId}/review`, { action, reason })).data; }
+
+/** One statement from an entity summary, and the evidence it was read from. */
+export type EntitySentence = { text: string; evidence: string | null; place: string | null; basis: string | null };
+
+export type EntitySummaryRecord = {
+  entity_id: string;
+  label: string;
+  entity_type: string;
+  sentences: EntitySentence[];
+  roles: string[];
+  source_count: number;
+  relation_count: number;
+  caveat: string;
+  summary_version: string;
+};
+
+/**
+ * Who an identity is, assembled by the server from stored rows. Nothing is generated, so every
+ * sentence carries its source and no part of the case leaves the machine to produce it.
+ */
+export async function getEntitySummary(caseId: string, entityId: string): Promise<EntitySummaryRecord> {
+  return (await apiClient.get(`${base(caseId)}/entities/${entityId}/summary`)).data;
+}

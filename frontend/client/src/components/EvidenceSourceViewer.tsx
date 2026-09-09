@@ -20,6 +20,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileWarning, Loader2, Minus, Plus, X } from "lucide-react";
+import EntitySummaryCard from "@/components/EntitySummaryCard";
 import { getOriginalObjectUrl, getPageObjectUrl, getSourceView, type SourceLine, type SourceTarget, type SourceViewRecord } from "@/api/sourceView";
 
 export type SourceRequest = {
@@ -29,6 +30,12 @@ export type SourceRequest = {
   /** What the reader clicked, shown at the top so they know what they are looking for. */
   title: string;
   subtitle?: string;
+  /**
+   * Set when the panel was opened from an identity rather than from one observation. The reader
+   * clicked a name: they want to know who it is before they are shown the line it came from, and
+   * the panel covers the page, so the answer has to be in here rather than behind it.
+   */
+  entityId?: string | null;
 };
 
 type Mode = "parsed" | "original";
@@ -223,7 +230,7 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
 
   return <>
     <button aria-label="Close source panel" onClick={close} className="fixed inset-0 z-[85] bg-[#241a15]/45 backdrop-blur-[2px]"/>
-    <aside role="dialog" aria-modal="true" aria-label="Evidence source" className="fixed right-0 top-0 z-[86] flex h-full w-full max-w-[min(920px,94vw)] flex-col border-l border-[#e2d5c7] bg-[#fffdf8] shadow-[-24px_0_60px_rgba(63,36,25,.28)]">
+    <aside role="dialog" aria-modal="true" aria-label="Evidence source" className="fixed right-0 top-0 z-[86] flex h-full w-full max-w-[min(920px,94vw)] flex-col overflow-y-auto border-l border-[#e2d5c7] bg-[#fffdf8] shadow-[-24px_0_60px_rgba(63,36,25,.28)]">
 
       <header className="border-b border-[#eadfd3] bg-[#fffaf3] px-5 py-4">
         <div className="flex items-start justify-between gap-4">
@@ -260,6 +267,10 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
 
       {error && <div className="grid flex-1 place-items-center p-8 text-center">
         <span><FileWarning className="mx-auto text-[#a33831]" size={28}/><p className="mt-3 max-w-sm text-[11px] leading-5 text-[#76695e]">{error}</p></span>
+      </div>}
+
+      {request.entityId && <div className="border-b border-[#eadfd3] bg-[#f7f2e9] px-5 pb-1 pt-4">
+        <EntitySummaryCard caseId={request.caseId} entityId={request.entityId}/>
       </div>}
 
       {view && !loading && <>

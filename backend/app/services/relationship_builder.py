@@ -64,7 +64,7 @@ RELATION_MEANING = {
     REQUESTED_PAYMENT_FROM: "The source states that the first party asked the second for money. It does not record that any money moved.",
     CALLED: "The call record names the first number as the calling party and the second as the called party.",
     USED_VEHICLE: "One sentence in the source states that the person was driving, riding or using the vehicle.",
-    LOCATED_AT: "One sentence in the source places the person at this location. It does not establish when.",
+    LOCATED_AT: "One sentence in the source places it at this location. It does not establish when.",
     MESSAGED: "The source states that the first party sent a message to the second.",
     COMMUNICATED_WITH: "The source records contact between the two parties but does not state who initiated it.",
     ASSOCIATED_WITH: "The source names these two as the parties to the same record, without stating what passed between them.",
