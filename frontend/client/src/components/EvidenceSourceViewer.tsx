@@ -52,25 +52,23 @@ function Chip({ tone, children }: { tone: "found" | "unfound" | "context"; child
 }
 
 /** The original image with the located regions drawn over it, in the image's own coordinates. */
-function ImageSource({ view, url }: { view: SourceViewRecord; url: string | null }) {
+function ImageSource({ view, url, jumpToMark }: { view: SourceViewRecord; url: string | null; jumpToMark: boolean }) {
   const [zoom, setZoom] = useState(1);
   const [showAll, setShowAll] = useState(false);
   const marked = view.regions.filter((region) => region.highlight);
   const drawn = showAll ? view.regions : marked;
-  const frame = useRef<HTMLDivElement | null>(null);
+  const cited = useRef<HTMLSpanElement | null>(null);
 
-  // Scroll the citation into view, because a screenshot is usually taller than the panel.
+  // Bring the citation into view through the page rather than an inner frame, now that the panel
+  // is the thing that scrolls.
   useEffect(() => {
-    const anchor = view.regions.find((region) => region.cited) ?? marked[0];
-    if (!anchor || !frame.current || !view.height) return;
-    const top = (anchor.bbox[1] / view.height) * frame.current.scrollHeight;
-    frame.current.scrollTo({ top: Math.max(0, top - 120), behavior: "smooth" });
-  }, [view.evidence_id, url, zoom]);
+    if (jumpToMark) cited.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [view.evidence_id, url, jumpToMark]);
 
   if (!url) return <p className="p-5 text-[11px] text-[#76695e]">Loading the original image…</p>;
 
-  return <div className="flex min-h-0 flex-1 flex-col">
-    <div className="flex items-center justify-between border-b border-[#eadfd3] bg-[#fffaf3] px-4 py-2">
+  return <div>
+    <div className="sticky top-0 z-[1] flex items-center justify-between border-b border-[#eadfd3] bg-[#fffaf3] px-4 py-2">
       <span className="text-[9px] font-bold uppercase tracking-[.12em] text-[#8f493f]">{view.page_image ? `Page ${view.page_number} of ${view.page_count} · ${marked.length} marked` : `${view.width}×${view.height} px · ${view.regions.length} text regions`}</span>
       <span className="flex items-center gap-2">
         {!view.page_image && <label className="flex items-center gap-1.5 text-[9px] font-bold text-[#6b5b51]">
@@ -83,7 +81,7 @@ function ImageSource({ view, url }: { view: SourceViewRecord; url: string | null
       </span>
     </div>
 
-    <div ref={frame} className="min-h-0 flex-1 overflow-auto bg-[#2a2320] p-4">
+    <div className="overflow-x-auto bg-[#2a2320] p-4">
       <div className="relative mx-auto" style={{ width: `${(view.width ?? 0) * zoom}px` }}>
         <img src={url} alt={`Original evidence: ${view.original_name}`} className="block w-full select-none" draggable={false}/>
         {view.width && view.height && drawn.map((region) => {
@@ -99,18 +97,21 @@ function ImageSource({ view, url }: { view: SourceViewRecord; url: string | null
             : region.highlight
               ? "border-2 border-[#e0a33c] bg-[#e0a33c]/15"
               : "border border-[#f0c755]/45";
-          return <span key={region.id} title={region.text} style={style} className={`pointer-events-none absolute rounded-[3px] ${tone}`}/>;
+          return <span key={region.id} ref={region.cited ? cited : undefined} title={region.text} style={style} className={`pointer-events-none absolute rounded-[3px] ${tone}`}/>;
         })}
       </div>
     </div>
   </div>;
 }
 
-function TableSource({ view }: { view: SourceViewRecord }) {
+function TableSource({ view, jumpToMark }: { view: SourceViewRecord; jumpToMark: boolean }) {
   const anchor = useRef<HTMLTableRowElement | null>(null);
-  useEffect(() => { anchor.current?.scrollIntoView({ block: "center", behavior: "smooth" }); }, [view.evidence_id]);
+  useEffect(() => {
+    if (jumpToMark) anchor.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [view.evidence_id, jumpToMark]);
 
-  return <div className="min-h-0 flex-1 overflow-auto">
+  // Horizontal only. A wide table scrolls sideways; the page carries the vertical scrolling.
+  return <div className="overflow-x-auto">
     <table className="w-full min-w-max text-left">
       <thead className="sticky top-0 z-10 border-b border-[#eadfd3] bg-[#fff8f0]">
         <tr className="text-[9px] font-extrabold uppercase tracking-[.1em] text-[#8f493f]">
@@ -142,11 +143,13 @@ function TableSource({ view }: { view: SourceViewRecord }) {
   </div>;
 }
 
-function LineSource({ lines, truncated }: { lines: SourceLine[]; truncated: boolean }) {
+function LineSource({ lines, truncated, jumpToMark }: { lines: SourceLine[]; truncated: boolean; jumpToMark: boolean }) {
   const anchor = useRef<HTMLDivElement | null>(null);
-  useEffect(() => { anchor.current?.scrollIntoView({ block: "center", behavior: "smooth" }); }, [lines]);
+  useEffect(() => {
+    if (jumpToMark) anchor.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [lines, jumpToMark]);
 
-  return <div className="min-h-0 flex-1 overflow-auto bg-[#fffdf8] px-4 py-4">
+  return <div className="bg-[#fffdf8] px-4 py-4">
     {lines.map((line) => <div
       key={`${line.page ?? 0}-${line.number}`}
       ref={line.cited ? anchor : undefined}
@@ -226,13 +229,16 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
   // What "original" means depends on the file: a picture is always its own original, a PDF is
   // shown by the browser, and a table has the text it arrived as.
   const hasOriginal = Boolean(view && (view.kind === "image" || asPage || view.raw_lines.length));
+  // A panel opened from a name starts at the summary that answers it; one opened from an
+  // observation starts at the line that observation was read from.
+  const jumpToMark = !request.entityId;
   const showOriginal = mode === "original" && hasOriginal;
 
   return <>
     <button aria-label="Close source panel" onClick={close} className="fixed inset-0 z-[85] bg-[#241a15]/45 backdrop-blur-[2px]"/>
     <aside role="dialog" aria-modal="true" aria-label="Evidence source" className="fixed right-0 top-0 z-[86] flex h-full w-full max-w-[min(920px,94vw)] flex-col overflow-y-auto border-l border-[#e2d5c7] bg-[#fffdf8] shadow-[-24px_0_60px_rgba(63,36,25,.28)]">
 
-      <header className="border-b border-[#eadfd3] bg-[#fffaf3] px-5 py-4">
+      <header className="sticky top-0 z-10 border-b border-[#eadfd3] bg-[#fffaf3] px-5 py-4">
         <div className="flex items-start justify-between gap-4">
           <span className="min-w-0">
             <p className="text-[9px] font-extrabold uppercase tracking-[.15em] text-[#8f3f37]">Source · every statement opens where it was read</p>
@@ -263,9 +269,9 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
         </div>}
       </header>
 
-      {loading && <div className="grid flex-1 place-items-center"><span className="flex items-center gap-2 text-[11px] text-[#76695e]"><Loader2 className="animate-spin" size={15}/>Opening the source…</span></div>}
+      {loading && <div className="grid min-h-[40vh] flex-1 place-items-center"><span className="flex items-center gap-2 text-[11px] text-[#76695e]"><Loader2 className="animate-spin" size={15}/>Opening the source…</span></div>}
 
-      {error && <div className="grid flex-1 place-items-center p-8 text-center">
+      {error && <div className="grid min-h-[40vh] flex-1 place-items-center p-8 text-center">
         <span><FileWarning className="mx-auto text-[#a33831]" size={28}/><p className="mt-3 max-w-sm text-[11px] leading-5 text-[#76695e]">{error}</p></span>
       </div>}
 
@@ -276,18 +282,18 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
       {view && !loading && <>
         {view.note && <p className="border-b border-[#eadfd3] bg-[#fff8e8] px-5 py-3 text-[10px] leading-5 text-[#8a6a3a]">{view.note}</p>}
 
-        {view.kind === "image" && <ImageSource view={view} url={objectUrl}/>}
+        {view.kind === "image" && <ImageSource view={view} url={objectUrl} jumpToMark={jumpToMark}/>}
 
         {view.kind === "table" && (showOriginal
-          ? <LineSource lines={view.raw_lines} truncated={view.truncated}/>
-          : <TableSource view={view}/>)}
+          ? <LineSource lines={view.raw_lines} truncated={view.truncated} jumpToMark={jumpToMark}/>
+          : <TableSource view={view} jumpToMark={jumpToMark}/>)}
 
         {view.kind === "text" && (showOriginal && asPage
-          ? <ImageSource view={view} url={objectUrl}/>
-          : <LineSource lines={view.lines} truncated={view.truncated}/>)}
+          ? <ImageSource view={view} url={objectUrl} jumpToMark={jumpToMark}/>
+          : <LineSource lines={view.lines} truncated={view.truncated} jumpToMark={jumpToMark}/>)}
       </>}
 
-      <footer className="flex items-center justify-between gap-4 border-t border-[#eadfd3] bg-[#fffaf3] px-5 py-2.5 text-[9px] leading-4 text-[#847468]">
+      <footer className="sticky bottom-0 z-10 mt-auto flex items-center justify-between gap-4 border-t border-[#eadfd3] bg-[#fffaf3] px-5 py-2.5 text-[9px] leading-4 text-[#847468]">
         <span>The marked place is where this value was read from. It is not a finding about what the evidence means.</span>
         <span className="flex shrink-0 items-center gap-3">
           <span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-sm border-2 border-[#e0483c] bg-[#e0483c]/20"/>Read here</span>
