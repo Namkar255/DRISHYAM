@@ -13,6 +13,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from collections import Counter
+from contextlib import contextmanager
 from contextvars import ContextVar
 
 import matplotlib
@@ -1568,6 +1569,25 @@ def _append_source_crops(story: list[object], styles, db: Session, case_id: str,
 # the audit log records. That is the right way round for this division's work.
 PROTECTED_LABEL = "Protected person"
 REDACTION_PROFILES = ("protected", "identified")
+
+
+@contextmanager
+def redaction_context(db: Session, case_id: str, profile: str = "protected"):
+    """The protected-identity rule the reports apply, lent to anything else that leaves the system.
+
+    Exposed rather than reimplemented. A second copy of "which name is protected and what replaces
+    it" would drift from this one, and the day it did, the export would disclose a name the report
+    was still hiding -- with nothing to indicate the two disagreed.
+
+    Yields a callable that renders a value under the profile. Where nothing is declared protected it
+    yields a plain renderer, so callers never branch on whether redaction is active.
+    """
+    case = db.get(Case, case_id)
+    redactor = _Redactor({"victim_alias": case.victim_alias if case else None}, profile)
+    if redactor.applied:
+        yield redactor
+    else:
+        yield lambda value: "" if value is None else str(value)
 
 
 class _Redactor:

@@ -57,7 +57,7 @@ from app.schemas.grounded import (
 )
 from app.core.security import utcnow
 from app.graph import analytics
-from app.services import case_assistant, entity_profile, entity_summary, ledger, record_review, relationship_builder, temporal
+from app.services import case_assistant, entity_profile, entity_summary, ledger, record_review, requisition, relationship_builder, temporal
 from app.services.audit import audit
 from app.services.cases import require_case_access
 from app.services.grounded_pipeline import GROUNDED_PIPELINE_VERSION, UI_STAGE_ORDER
@@ -750,6 +750,30 @@ def read_entity_profile(case_id: str, entity_id: str, current_user: CurrentUser,
     )
     db.commit()
     return profile.to_dict()
+
+
+@router.get("/requisition/draft")
+def requisition_draft(case_id: str, current_user: CurrentUser, db: DbSession) -> dict:
+    """Draft what to request next, from what this case already records.
+
+    The system drafts; it does not submit. What comes back is text an officer reads, edits and sends
+    under their own name -- a requisition is a legal instrument and must carry a person's judgement,
+    not a system's output. Nothing here is addressed, signed or transmitted.
+    """
+    case = require_case_access(db, case_id, current_user)
+    draft = requisition.build(db, case_id, case.case_number)
+    audit(
+        db,
+        action="requisition.draft",
+        object_type="case",
+        object_id=case_id,
+        case_id=case_id,
+        outcome="success",
+        actor_id=current_user.id,
+        details={"subjects": len(draft.subjects)},
+    )
+    db.commit()
+    return draft.to_dict()
 
 
 @router.get("/entities/{entity_id}/elsewhere")
