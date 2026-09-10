@@ -58,7 +58,10 @@ export type GraphRecord = {
   };
 };
 export type TransactionRecord = { id: string; event_id: string | null; source_evidence_id: string; amount: number; currency: string; occurred_at: string | null; reference_id: string | null; sender_value: string | null; receiver_value: string | null; source_kind: string; confidence: number; review_status: string };
-export type AlertRecord = { id: string; rule_code: string; severity: string; status: string; explanation: string; affected_evidence_ids: string[]; related_event_id: string | null; generated_at: string; reviewed_at: string | null };
+/** One line of an alert's sequence: what a source states, and where to read it. */
+export type AlertStep = { statement: string; when: string | null; evidence_id: string | null; place: string | null; source_reference: Record<string, unknown>; kind: "fact" | "gap" | "closing" };
+
+export type AlertRecord = { id: string; rule_code: string; severity: string; status: string; explanation: string; affected_evidence_ids: string[]; sequence: AlertStep[] | null; related_event_id: string | null; generated_at: string; reviewed_at: string | null };
 export type ProcessingRunRecord = { id: string; evidence_id: string; evidence_name: string; pipeline_stage: string; pipeline_version: string; state: string; attempt: number; progress: number; warning_messages: unknown[]; failure_reason: string | null; started_at: string | null; completed_at: string | null; created_at: string };
 export type AuditLogRecord = { id: string; actor_id: string | null; action: string; object_type: string; object_id: string | null; outcome: string; details: Record<string, unknown>; previous_hash: string | null; event_hash: string | null; created_at: string };
 export type SearchResultRecord = { kind: string; id: string; target: string; title: string; excerpt: string; details: Record<string, unknown> };

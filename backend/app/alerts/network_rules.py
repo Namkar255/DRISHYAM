@@ -18,11 +18,23 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Alert, Entity, NormalizedRecord, Severity
+from app.alerts import narrative
+from app.alerts.narrative import Step
+from app.models.entities import (
+    Alert,
+    Case,
+    Entity,
+    EntityOccurrence,
+    EntityRelation,
+    EvidenceFile,
+    NormalizedRecord,
+    Severity,
+)
 from app.services import temporal
 
 logger = logging.getLogger(__name__)
@@ -48,6 +60,7 @@ def _raise(
     severity: Severity,
     explanation: str,
     evidence_ids: list[str],
+    sequence: list[dict] | None = None,
 ) -> bool:
     """Record one alert, once. Returns whether it was new."""
     idempotency_key = f"{case_id}:{rule_code}:{NETWORK_RULES_VERSION}:{key}"
@@ -60,10 +73,58 @@ def _raise(
             severity=severity,
             explanation=explanation,
             affected_evidence_ids=evidence_ids,
+            sequence=sequence,
             idempotency_key=idempotency_key,
         )
     )
     return True
+
+
+def _record_places(db: Session, case_id: str) -> dict[str, dict]:
+    """Where each normalized record sits inside its file.
+
+    A record does not carry its own page or row; the occurrences read out of it do. Reading them
+    back here is what lets a record-based line of a story be opened at the place it came from,
+    rather than merely naming the file and leaving the reader to search it.
+    """
+    places: dict[str, dict] = {}
+    rows = db.scalars(
+        select(EntityOccurrence).where(EntityOccurrence.case_id == case_id, EntityOccurrence.record_id.isnot(None))
+    ).all()
+    for row in rows:
+        places.setdefault(str(row.record_id), dict(row.source_reference or {}))
+    return places
+
+
+def _record_step(record: NormalizedRecord, statement: str, places: dict[str, dict]) -> Step:
+    reference = places.get(record.id, {})
+    return Step(
+        statement=statement,
+        when=record.event_time,
+        evidence_id=record.evidence_id,
+        place=narrative._place(reference),
+        source_reference=reference,
+    )
+
+
+def _relations(db: Session, relation_ids: list[str]) -> list[EntityRelation]:
+    """The relationship rows a finding was built from, so the alert can retell them.
+
+    A finding carries ids rather than rows; reading them back here keeps the arithmetic in
+    `temporal` free of presentation and means the story is assembled from the same records the
+    threshold was counted over, not a second query that might disagree with it.
+    """
+    if not relation_ids:
+        return []
+    rows = db.scalars(select(EntityRelation).where(EntityRelation.id.in_(relation_ids))).all()
+    return list(rows)
+
+
+def _story(db: Session, relation_ids: list[str], entities: dict[str, Entity], *, gaps: bool = True) -> list[dict]:
+    return narrative.sequence(
+        (narrative.step_from_relation(item, entities) for item in _relations(db, relation_ids)),
+        gaps=gaps,
+    )
 
 
 def _pre_incident_communication(db: Session, case_id: str, entities: dict[str, Entity]) -> int:
@@ -83,6 +144,7 @@ def _pre_incident_communication(db: Session, case_id: str, entities: dict[str, E
                 "Contact before an incident is not evidence of involvement in it; open the call records and read them."
             ),
             evidence_ids=finding["evidence_ids"],
+            sequence=_story(db, finding["relation_ids"], entities),
         )
     return raised
 
@@ -103,6 +165,8 @@ def _communication_burst(db: Session, case_id: str, entities: dict[str, Entity])
                 "A burst of contact can have an ordinary explanation; the records themselves are the evidence."
             ),
             evidence_ids=finding["evidence_ids"],
+            # A burst is dense by definition, so stating the silences inside it would be noise.
+            sequence=_story(db, finding["relation_ids"], entities, gaps=False),
         )
     return raised
 
@@ -120,11 +184,16 @@ def _recurring_vehicle_at_location(db: Session, case_id: str) -> int:
             for place in record.location_names or []:
                 sightings[(str(vehicle), str(place))].append(record)
 
+    places = _record_places(db, case_id)
     raised = 0
     for (vehicle, place), matches in sightings.items():
         if len(matches) < RECURRING_SIGHTING_MIN:
             continue
         evidence_ids = sorted({item.evidence_id for item in matches})
+        story = narrative.sequence(
+            _record_step(item, f"{vehicle} and {place} are recorded together in this record.", places)
+            for item in matches
+        )
         raised += _raise(
             db,
             case_id=case_id,
@@ -137,11 +206,12 @@ def _recurring_vehicle_at_location(db: Session, case_id: str) -> int:
                 "The sources record them together; they do not establish that the vehicle was there at a stated time."
             ),
             evidence_ids=evidence_ids,
+            sequence=story,
         )
     return raised
 
 
-def _bridge_entity(db: Session, case_id: str) -> int:
+def _bridge_entity(db: Session, case_id: str, entities: dict[str, Entity]) -> int:
     """Entities whose removal would disconnect the network.
 
     These are where the case is most fragile: if the relationship through such an entity is wrong,
@@ -169,6 +239,229 @@ def _bridge_entity(db: Session, case_id: str) -> int:
             # Raised with an empty list, it told a reviewer to verify relationships it gave them no
             # way to open.
             evidence_ids=list(entry.get("supporting_evidence_ids") or []),
+            # A bridge is not a chronology, so the sequence is the relationships running through it
+            # -- the exact ones a reviewer is being asked to verify first, each openable.
+            sequence=narrative.sequence(
+                (
+                    narrative.step_from_relation(item, entities)
+                    for item in db.scalars(
+                        select(EntityRelation).where(
+                            EntityRelation.case_id == case_id,
+                            (EntityRelation.subject_entity_id == entry["entity_id"])
+                            | (EntityRelation.object_entity_id == entry["entity_id"]),
+                        )
+                    ).all()
+                ),
+                gaps=False,
+            ),
+        )
+    return raised
+
+
+# --------------------------------------------------------------------------- C2: five more patterns
+
+# Several distinct parties named at one location inside this span is a convergence worth a look.
+CONVERGENCE_WINDOW = timedelta(hours=6)
+CONVERGENCE_MIN_PARTIES = 3
+
+# An identity that enters the case this long after it was opened did not come from the evidence
+# originally filed. That is a fact about the case file, and the wording says so.
+LATE_ARRIVAL_AFTER = timedelta(hours=24)
+
+# A vehicle recorded at this many distinct places, in time order, is a route rather than a sighting.
+CORRIDOR_MIN_PLACES = 3
+
+
+def _relay(db: Session, case_id: str, entities: dict[str, Entity]) -> int:
+    """A contacts B, then B contacts C, close enough together to read as one movement."""
+    raised = 0
+    for finding in temporal.relays(db, case_id):
+        start, middle, end = finding["path"]
+        raised += _raise(
+            db,
+            case_id=case_id,
+            rule_code="RELAY_CONTACT",
+            key=":".join(finding["path"]),
+            severity=Severity.MEDIUM,
+            explanation=(
+                f"Review lead: {_label(entities, start)} is recorded in contact with {_label(entities, middle)}, and "
+                f"{finding['minutes']} minutes later {_label(entities, middle)} is recorded in contact with "
+                f"{_label(entities, end)}. The records show this shape; they do not establish that anything was passed "
+                "on, or that the two contacts are related at all. Read both records."
+            ),
+            evidence_ids=finding["evidence_ids"],
+            sequence=_story(db, finding["relation_ids"], entities, gaps=False),
+        )
+    return raised
+
+
+def _converging_location(db: Session, case_id: str) -> int:
+    """Several distinct parties named at one place inside a short span."""
+    records = db.scalars(
+        select(NormalizedRecord).where(NormalizedRecord.case_id == case_id, NormalizedRecord.event_time.isnot(None))
+    ).all()
+    at_place: dict[str, list[NormalizedRecord]] = defaultdict(list)
+    for record in records:
+        for place in record.location_names or []:
+            at_place[str(place)].append(record)
+
+    places = _record_places(db, case_id)
+    raised = 0
+    for place, matches in at_place.items():
+        matches.sort(key=lambda item: item.event_time)
+        for index, anchor in enumerate(matches):
+            window = [item for item in matches[index:] if item.event_time - anchor.event_time <= CONVERGENCE_WINDOW]
+            parties = {
+                str(name)
+                for item in window
+                for name in (item.person_names or []) + (item.vehicle_identifiers or []) + (item.phone_numbers or [])
+            }
+            if len(parties) < CONVERGENCE_MIN_PARTIES:
+                continue
+            evidence_ids = sorted({item.evidence_id for item in window})
+            raised += _raise(
+                db,
+                case_id=case_id,
+                rule_code="CONVERGING_LOCATION",
+                key=f"{place}:{anchor.event_time.isoformat()}",
+                severity=Severity.MEDIUM,
+                explanation=(
+                    f"Review lead: {len(parties)} distinct parties are recorded in connection with {place} within "
+                    f"{int(CONVERGENCE_WINDOW.total_seconds() // 3600)} hours of each other, across "
+                    f"{len(evidence_ids)} evidence files. Being named against the same place in the same window is "
+                    "not a record of anyone meeting anyone. Read the records and see what each one actually states."
+                ),
+                evidence_ids=evidence_ids,
+                sequence=narrative.sequence(
+                    _record_step(item, f"This record names {place}.", places) for item in window
+                ),
+            )
+            break  # one convergence per place is enough to prompt a look
+    return raised
+
+
+def _late_arriving_identity(db: Session, case_id: str, entities: dict[str, Entity]) -> int:
+    """An identity that entered the case well after it was opened.
+
+    This is a fact about the case file, not about the world: it says the identity was not in the
+    evidence originally filed and came in with something added later. An investigator reads that
+    differently from an identity that was there from the start, and nothing else reports it.
+    """
+    case = db.get(Case, case_id)
+    if case is None:
+        return 0
+
+    arrivals: dict[str, EntityOccurrence] = {}
+    rows = db.scalars(
+        select(EntityOccurrence).where(EntityOccurrence.case_id == case_id).order_by(EntityOccurrence.created_at)
+    ).all()
+    for row in rows:
+        arrivals.setdefault(row.entity_id, row)
+
+    files = {item.id: item for item in db.scalars(select(EvidenceFile).where(EvidenceFile.case_id == case_id)).all()}
+    raised = 0
+    for entity_id, first in arrivals.items():
+        delay = first.created_at - case.created_at
+        if delay < LATE_ARRIVAL_AFTER:
+            continue
+        source = files.get(first.evidence_id)
+        raised += _raise(
+            db,
+            case_id=case_id,
+            rule_code="LATE_ARRIVING_IDENTITY",
+            key=entity_id,
+            severity=Severity.LOW,
+            explanation=(
+                f"Review lead: {_label(entities, entity_id)} was not present in the evidence this case opened with. "
+                f"It first appears {round(delay.total_seconds() / 86400, 1)} days later, in "
+                f"{source.original_name if source else 'an evidence file added afterwards'}. "
+                "That is a fact about when the file arrived, not about when the identity became involved."
+            ),
+            evidence_ids=[first.evidence_id],
+            sequence=narrative.sequence(
+                [
+                    Step(
+                        statement=(
+                            f"{_label(entities, entity_id)} is first recorded in this case here, "
+                            f"written as {first.observed_value}."
+                        ),
+                        when=first.created_at,
+                        evidence_id=first.evidence_id,
+                        place=narrative._place(first.source_reference),
+                        source_reference=dict(first.source_reference or {}),
+                    )
+                ],
+                gaps=False,
+            ),
+        )
+    return raised
+
+
+def _vehicle_corridor(db: Session, case_id: str) -> int:
+    """One vehicle recorded at several distinct places, in the order the sources time them."""
+    records = db.scalars(
+        select(NormalizedRecord).where(NormalizedRecord.case_id == case_id, NormalizedRecord.event_time.isnot(None))
+    ).all()
+    journeys: dict[str, list[NormalizedRecord]] = defaultdict(list)
+    for record in records:
+        if not record.location_names:
+            continue
+        for vehicle in record.vehicle_identifiers or []:
+            journeys[str(vehicle)].append(record)
+
+    places = _record_places(db, case_id)
+    raised = 0
+    for vehicle, matches in journeys.items():
+        matches.sort(key=lambda item: item.event_time)
+        route = [str(name) for item in matches for name in (item.location_names or [])]
+        distinct = list(dict.fromkeys(route))
+        if len(distinct) < CORRIDOR_MIN_PLACES:
+            continue
+        evidence_ids = sorted({item.evidence_id for item in matches})
+        raised += _raise(
+            db,
+            case_id=case_id,
+            rule_code="VEHICLE_CORRIDOR",
+            key=f"{vehicle}:{len(distinct)}",
+            severity=Severity.MEDIUM,
+            explanation=(
+                f"Review lead: {vehicle} is recorded in connection with {len(distinct)} distinct places, across "
+                f"{len(evidence_ids)} evidence files, which the sources time in this order: "
+                f"{' then '.join(distinct)}. The order is the order of the records. It does not establish that the "
+                "vehicle travelled between them, or that the same driver was involved throughout."
+            ),
+            evidence_ids=evidence_ids,
+            sequence=narrative.sequence(
+                _record_step(
+                    item,
+                    f"{vehicle} is recorded with {', '.join(str(name) for name in item.location_names or [])}.",
+                    places,
+                )
+                for item in matches
+            ),
+        )
+    return raised
+
+
+def _sudden_silence(db: Session, case_id: str, entities: dict[str, Entity]) -> int:
+    """A pair in regular recorded contact whose contact stops while the case keeps recording."""
+    raised = 0
+    for finding in temporal.sudden_silence(db, case_id):
+        left, right = finding["pair"]
+        raised += _raise(
+            db,
+            case_id=case_id,
+            rule_code="SUDDEN_SILENCE",
+            key=f"{left}:{right}",
+            severity=Severity.MEDIUM,
+            explanation=(
+                f"Review lead: {_label(entities, left)} and {_label(entities, right)} are recorded in contact "
+                f"{finding['contacts']} times, roughly every {finding['usual_gap_hours']} hours, and then not again. "
+                f"The record continues for a further {finding['silent_hours']} hours with no contact between them. "
+                "Numbers change and people fall out; the record shows the pattern stopping and says nothing about why."
+            ),
+            evidence_ids=finding["evidence_ids"],
+            sequence=_story(db, finding["relation_ids"], entities),
         )
     return raised
 
@@ -180,7 +473,12 @@ def evaluate_network_alerts(db: Session, case_id: str) -> dict[str, int]:
         "pre_incident_communication": _pre_incident_communication(db, case_id, entities),
         "communication_burst": _communication_burst(db, case_id, entities),
         "recurring_vehicle_at_location": _recurring_vehicle_at_location(db, case_id),
-        "bridge_entity": _bridge_entity(db, case_id),
+        "bridge_entity": _bridge_entity(db, case_id, entities),
+        "relay": _relay(db, case_id, entities),
+        "converging_location": _converging_location(db, case_id),
+        "late_arriving_identity": _late_arriving_identity(db, case_id, entities),
+        "vehicle_corridor": _vehicle_corridor(db, case_id),
+        "sudden_silence": _sudden_silence(db, case_id, entities),
     }
     counts["total_new"] = sum(counts.values())
     counts["rules_version"] = NETWORK_RULES_VERSION  # type: ignore[assignment]

@@ -184,3 +184,107 @@ def case_chronology(db: Session, case_id: str) -> dict:
         "contacts_without_established_time": bool(undated),
         "temporal_version": TEMPORAL_VERSION,
     }
+
+
+# --------------------------------------------------------------------------- relay
+
+# How quickly the second leg must follow the first to be one movement of information rather than
+# two unrelated conversations that happen to share a party.
+RELAY_WINDOW = timedelta(hours=2)
+
+
+def relays(db: Session, case_id: str) -> list[dict]:
+    """A contacts B, then B contacts C, close enough together to be worth reading as one movement.
+
+    This is arithmetic on three parties and two timestamps. It does not establish that anything was
+    passed on, that B acted on the first contact, or that the two contacts are related at all --
+    people talk to several others in an evening. It says the shape is present and names the records.
+    """
+    relations = _contact_relations(db, case_id)
+    by_time = sorted(relations, key=lambda item: item.observed_at)
+
+    findings: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for index, first in enumerate(by_time):
+        for second in by_time[index + 1 :]:
+            if second.observed_at - first.observed_at > RELAY_WINDOW:
+                break
+            for middle in (first.subject_entity_id, first.object_entity_id):
+                if middle not in (second.subject_entity_id, second.object_entity_id):
+                    continue
+                start = first.object_entity_id if middle == first.subject_entity_id else first.subject_entity_id
+                end = second.object_entity_id if middle == second.subject_entity_id else second.subject_entity_id
+                # A talking to B and then B back to A is a conversation, not a relay.
+                if len({start, middle, end}) < 3:
+                    continue
+                key = (start, middle, end)
+                if key in seen:
+                    continue
+                seen.add(key)
+                findings.append({
+                    "path": key,
+                    "first": first.observed_at,
+                    "last": second.observed_at,
+                    "minutes": round((second.observed_at - first.observed_at).total_seconds() / 60),
+                    "evidence_ids": sorted({first.source_evidence_id, second.source_evidence_id}),
+                    "relation_ids": [first.id, second.id],
+                })
+    findings.sort(key=lambda item: item["minutes"])
+    return findings
+
+
+# --------------------------------------------------------------------------- contact that stops
+
+# A pair needs this much recorded history before its silence means anything. Two calls and then
+# nothing is not a pattern breaking; it is two calls.
+SILENCE_MIN_CONTACTS = 3
+# The final gap must be this many times the pair's usual spacing before it counts as a stop rather
+# than a longer-than-usual pause.
+SILENCE_MULTIPLE = 4.0
+
+
+def sudden_silence(db: Session, case_id: str) -> list[dict]:
+    """Pairs in regular recorded contact whose contact stops while the case keeps recording.
+
+    The comparison that makes this honest is the last one: the pair's contact must stop well before
+    the case's own record ends. Without it, every pair looks silent at the edge of the data, because
+    that is where the evidence stops -- not where the contact did.
+
+    It establishes nothing about why contact stopped. Phones are replaced, numbers change, and
+    people fall out. It says the recorded pattern changed and names the records that show it.
+    """
+    relations = _contact_relations(db, case_id)
+    if not relations:
+        return []
+    record_ends = max(item.observed_at for item in relations)
+
+    grouped: dict[tuple[str, str], list[EntityRelation]] = defaultdict(list)
+    for relation in relations:
+        grouped[_pair(relation)].append(relation)
+
+    findings: list[dict] = []
+    for pair, items in grouped.items():
+        if len(items) < SILENCE_MIN_CONTACTS:
+            continue
+        items.sort(key=lambda item: item.observed_at)
+        intervals = [
+            (items[index].observed_at - items[index - 1].observed_at).total_seconds()
+            for index in range(1, len(items))
+        ]
+        usual = sorted(intervals)[len(intervals) // 2]
+        silence = (record_ends - items[-1].observed_at).total_seconds()
+        if usual <= 0 or silence < usual * SILENCE_MULTIPLE:
+            continue
+        findings.append({
+            "pair": pair,
+            "contacts": len(items),
+            "first": items[0].observed_at,
+            "last": items[-1].observed_at,
+            "usual_gap_hours": round(usual / 3600, 1),
+            "silent_hours": round(silence / 3600, 1),
+            "record_ends": record_ends,
+            "evidence_ids": sorted({item.source_evidence_id for item in items}),
+            "relation_ids": [item.id for item in items],
+        })
+    findings.sort(key=lambda item: -item["silent_hours"])
+    return findings

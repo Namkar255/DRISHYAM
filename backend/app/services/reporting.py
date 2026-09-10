@@ -273,7 +273,7 @@ def _snapshot(db: Session, case_id: str) -> dict:
         "evidence": [{"id": item.id, "name": item.original_name, "hash": item.sha256, "status": item.status.value} for item in evidence],
         "events": [{"time": item.occurred_at.isoformat() if item.occurred_at else None, "original_time": item.original_time, "precision": item.time_precision, "type": item.event_type, "description": item.description, "review": item.review_status.value} for item in events],
         "transactions": [{"time": item.occurred_at.isoformat() if item.occurred_at else None, "amount": float(item.amount), "currency": item.currency or "INR", "sender": item.sender_value, "receiver": item.receiver_value, "reference": item.reference_id, "review": item.review_status.value} for item in transactions],
-        "alerts": [{"rule": item.rule_code, "severity": item.severity.value, "status": item.status.value, "explanation": item.explanation} for item in alerts],
+        "alerts": [{"rule": item.rule_code, "severity": item.severity.value, "status": item.status.value, "explanation": item.explanation, "sequence": item.sequence or []} for item in alerts],
         "claims": [{"id": item.id, "statement": item.statement, "type": item.claim_type, "status": item.status.value} for item in claims],
         "contradictions": [{"id": item.id, "subject": item.subject, "description": item.description, "status": item.status.value} for item in contradictions],
         "reviews": [{"subject_type": item.subject_type, "subject_id": item.subject_id, "decision": item.decision.value, "note": item.note} for item in reviews],
@@ -1730,6 +1730,38 @@ def _verification_id(report: Report) -> str:
     return f"TRU-{report.case_id[:8].upper()}-R{report.version}"
 
 
+# How many lines of an alert's story the report prints before stopping and saying so. The whole
+# sequence is in the case file and on screen; a report that reprinted every line of every alert
+# would bury the findings it exists to carry.
+ALERT_SEQUENCE_LINES = 6
+
+
+def _append_alert_sequence(story: list[object], styles, sequence: list[dict]) -> None:
+    """The sourced facts behind one alert, as the report prints them.
+
+    A reader holding the printed report cannot click a line, so each one carries the time and the
+    place it was read instead. The closing line is dropped here and stated once for the whole
+    section: repeating it under every alert would turn the sentence that matters into wallpaper.
+    """
+    facts = [step for step in sequence if step.get("kind") != "closing"]
+    if not facts:
+        return
+    for step in facts[:ALERT_SEQUENCE_LINES]:
+        when = _display_timestamp(step["when"]) if step.get("when") else "Time not established"
+        where = f" ({_safe(step['place'])})" if step.get("place") else ""
+        prefix = "" if step.get("kind") == "gap" else f"<b>{_safe(when)}</b>{where} — "
+        story.append(Paragraph(
+            f"<font size=8 color='#5b4c43'>{prefix}{_safe(step['statement'])}</font>",
+            styles["BodyText"],
+        ))
+    if len(facts) > ALERT_SEQUENCE_LINES:
+        story.append(Paragraph(
+            f"<font size=7 color='#6b6258'>{len(facts) - ALERT_SEQUENCE_LINES} further recorded "
+            "fact(s) behind this alert are not printed here. All of them are held in the case file.</font>",
+            styles["BodyText"],
+        ))
+
+
 def _append_verification(story: list[object], styles, db: Session, report: Report, evidence_records: list) -> None:
     """How a reader checks that this document and its evidence are what they claim to be."""
     story.append(PageBreak())
@@ -2409,13 +2441,14 @@ def generate_report(report_id: str) -> dict:
         # shrinks to a sentence when the case has nothing of that kind recorded.
         story.extend([PageBreak(), Paragraph("Alerts, claims and contradictions", styles["Heading1"])])
         if alert_records:
-            story.extend([Paragraph("Rule-based alerts", styles["Heading2"]), Paragraph("Alerts are reviewable rule-based leads, not a conclusion about intent, identity, truthfulness or culpability.", styles["BodyText"])])
+            story.extend([Paragraph("Rule-based alerts", styles["Heading2"]), Paragraph("Alerts are reviewable rule-based leads, not a conclusion about intent, identity, truthfulness or culpability. The facts printed under each alert are what the sources record, in the order they record them; what they mean is a matter for the reader.", styles["BodyText"])])
             alert_summary = [[_cell_lines(len(alert_records), "Total alerts"), _cell_lines(sum(1 for item in alert_records if item.status.value == "reviewed"), "Reviewed"), _cell_lines(sum(1 for item in alert_records if item.status.value == "open"), "Open"), _cell_lines(sum(1 for item in alert_records if item.severity.value in {"high", "critical"}), "High / critical")]]
             alert_summary_table = Table(alert_summary, colWidths=[45 * mm] * 4)
             alert_summary_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f7efe5")), ("BOX", (0, 0), (-1, -1), .5, colors.HexColor("#7b1e2b")), ("INNERGRID", (0, 0), (-1, -1), .25, colors.HexColor("#d7c7b7")), ("PADDING", (0, 0), (-1, -1), 6)]))
             story.extend([alert_summary_table, Spacer(1, 5 * mm)])
             for item in snapshot["alerts"]:
                 story.append(Paragraph(f"<b>{_safe(item['severity']).upper()} · {_safe(item['rule'])} · {_safe(item['status'])}</b><br/>{_safe(item['explanation'])}", styles["BodyText"]))
+                _append_alert_sequence(story, styles, item.get("sequence") or [])
                 story.append(Spacer(1, 2 * mm))
         else:
             story.append(Paragraph("No rule-based alert was raised against this case snapshot.", styles["BodyText"]))

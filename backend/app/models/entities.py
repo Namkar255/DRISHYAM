@@ -415,6 +415,11 @@ class Alert(Base):
     status: Mapped[AlertStatus] = mapped_column(SAEnum(AlertStatus, name="alert_status"), nullable=False, default=AlertStatus.OPEN)
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     affected_evidence_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # The sourced facts behind this alert, in the order the sources record them. Each step names the
+    # file and place it was read from, so a reader can open any line of the story rather than being
+    # handed a conclusion and a pile of file ids. Null means the alert predates the column and has
+    # no sequence -- which is not the same as a sequence in which nothing happened.
+    sequence: Mapped[list | None] = mapped_column(JSON)
     related_event_id: Mapped[str | None] = mapped_column(ForeignKey("events.id", ondelete="SET NULL"))
     idempotency_key: Mapped[str] = mapped_column(String(256), unique=True, nullable=False)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
