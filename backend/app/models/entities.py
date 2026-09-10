@@ -429,6 +429,61 @@ class Alert(Base):
     __table_args__ = (Index("ix_alerts_case_status_severity", "case_id", "status", "severity"),)
 
 
+class CaseVisit(Base):
+    """When one user last opened one case.
+
+    Per user rather than per case: what is new to an investigator returning after a week is not new
+    to the colleague who uploaded it yesterday, and a single shared timestamp would be wrong for
+    everybody except the last person through the door.
+
+    It records that somebody opened the case, which the audit log also records. This is not a
+    duplicate of that: the audit log is the account of who did what, and reading it backwards to
+    find one user's previous visit on every case open would be a query over the whole history to
+    answer a question one row can hold.
+    """
+
+    __tablename__ = "case_visits"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    last_opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (UniqueConstraint("case_id", "user_id", name="uq_case_visit"),)
+
+
+class CaseNote(Base):
+    """Something an investigator knows, kept beside what the system read.
+
+    An investigator holds things no evidence file states: what a witness said on the doorstep, which
+    of two spellings is the same person, why a lead was dropped. That belongs in the case, not in a
+    notebook that leaves with them.
+
+    **It is never mixed into extracted facts.** A note lives in its own table, is returned through
+    its own endpoint, and is marked as investigator commentary everywhere it is shown, including in
+    the report. The whole extraction layer is built on the line between what a source states and
+    what somebody concluded; a note that could be mistaken for the former would erase it.
+
+    Deletion is recorded rather than performed. A note that shaped an investigation and then
+    vanished without trace is exactly the kind of gap a defence should be able to see.
+    """
+
+    __tablename__ = "case_notes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    # What the note is about: an entity, a relation, or the case itself.
+    subject_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    author_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+    __table_args__ = (Index("ix_case_notes_subject", "case_id", "subject_type", "subject_id"),)
+
+
 class LedgerEntry(Base):
     """One identifier published to the shared ledger, as a hash and nothing else.
 

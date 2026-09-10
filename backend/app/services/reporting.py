@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import utcnow
-from app.models.entities import Alert, AuditLog, Case, Claim, Contradiction, Entity, EntityOccurrence, EntityRelation, Event, EvidenceFile, NormalizedRecord, ProcessingRun, ProcessingState, RecordRelation, Report, ReviewDecision, Transaction
+from app.models.entities import Alert, AuditLog, Case, Claim, Contradiction, Entity, EntityOccurrence, EntityRelation, Event, EvidenceFile, NormalizedRecord, ProcessingRun, ProcessingState, RecordRelation, Report, ReviewDecision, Transaction, User
 from app.graph.projection import build_case_graph
 from app.graph.connections import build_connection_graph, describe_connections
 from app.services import merkle
@@ -1767,6 +1767,54 @@ def _append_alert_sequence(story: list[object], styles, sequence: list[dict]) ->
         ))
 
 
+def _append_investigator_notes(story: list[object], styles, db: Session, case_id: str) -> None:
+    """What the investigators wrote down, in its own section and labelled as theirs.
+
+    Kept apart from the findings on purpose. A finding is something a source states and can be
+    opened at that source; a note is what somebody concluded, and printing the two in one list
+    would give the second the standing of the first.
+    """
+    from app.models.entities import CaseNote
+
+    notes = list(db.scalars(
+        select(CaseNote)
+        .where(CaseNote.case_id == case_id, CaseNote.deleted_at.is_(None))
+        .order_by(CaseNote.created_at)
+    ))
+    if not notes:
+        return
+
+    authors = {
+        item.id: item.name
+        for item in db.scalars(select(User).where(User.id.in_({note.author_id for note in notes}))).all()
+    }
+    story.extend([PageBreak(), Paragraph("Investigator commentary", styles["Heading1"])])
+    story.append(Paragraph(
+        "These are notes written by investigators on this case. They are not statements made by any source and "
+        "carry no evidential weight of their own; they record what somebody knew or concluded, with their name "
+        "and the time they wrote it.",
+        styles["BodyText"],
+    ))
+    story.append(Spacer(1, 3 * mm))
+    rows = [[_cell("When"), _cell("Investigator"), _cell("About"), _cell("Note")]]
+    for note in notes[:40]:
+        rows.append([
+            _cell(_display_timestamp(note.created_at)),
+            _cell(authors.get(note.author_id, "not recorded")),
+            _cell(str(note.subject_type)),
+            _cell(_safe(note.body)),
+        ])
+    table = Table(rows, colWidths=[32 * mm, 34 * mm, 22 * mm, 94 * mm], repeatRows=1)
+    table.setStyle(_report_table_style(header="slate"))
+    story.append(table)
+    if len(notes) > 40:
+        story.append(Paragraph(
+            f"<font size=7 color='#6b6258'>{len(notes) - 40} further note(s) are held in the case file and not "
+            "printed here.</font>",
+            styles["BodyText"],
+        ))
+
+
 def _append_verification(story: list[object], styles, db: Session, report: Report, evidence_records: list) -> None:
     """How a reader checks that this document and its evidence are what they claim to be."""
     story.append(PageBreak())
@@ -2461,6 +2509,8 @@ def generate_report(report_id: str) -> dict:
         # Where every figure above came from, with its quote, basis and confidence. This is the part
         # a reviewer checks the rest of the report against, so it comes before the housekeeping.
         _append_grounded_sections(story, styles, snapshot)
+
+        _append_investigator_notes(story, styles, db, report.case_id)
 
         # An empty finding is still a finding, but it does not need a page of zeros and a table of
         # em-dashes to say so. Alerts, claims and contradictions now share one page, and each part

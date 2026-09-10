@@ -13,6 +13,7 @@ from app.schemas.cases import (
     IncidentWindowRequest,
 )
 from app.services.audit import audit
+from app.services import whats_new as whats_new_service
 from app.services.cases import create_case_number, require_case_access
 
 router = APIRouter(prefix="/cases", tags=["cases"])
@@ -106,6 +107,26 @@ def set_incident_window(
     db.commit()
     db.refresh(case)
     return CaseResponse.model_validate(case, from_attributes=True)
+
+
+@router.get("/{case_id}/whats-new")
+def whats_new(case_id: str, current_user: CurrentUser, db: DbSession) -> dict:
+    """What has arrived in this case since this reader last opened it.
+
+    Reading it does not move the mark. A reader who glanced at the digest and was called away would
+    otherwise never see those changes again, which is the one way this feature could actively lose
+    somebody information.
+    """
+    require_case_access(db, case_id, current_user)
+    return whats_new_service.build(db, case_id, current_user).to_dict()
+
+
+@router.post("/{case_id}/whats-new/seen", status_code=status.HTTP_204_NO_CONTENT)
+def mark_seen(case_id: str, current_user: CurrentUser, db: DbSession) -> None:
+    """Mark this case as seen as it now stands. Explicit, because it is what clears the digest."""
+    require_case_access(db, case_id, current_user)
+    whats_new_service.record_visit(db, case_id, current_user)
+    db.commit()
 
 
 @router.post("/{case_id}/members", response_model=CaseMemberResponse, status_code=status.HTTP_201_CREATED)
