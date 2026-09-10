@@ -544,6 +544,11 @@ class TrustifyReceipt(Base):
     report_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     audit_chain_hash: Mapped[str | None] = mapped_column(String(64))
+    # One value standing for the whole set of evidence this report covered, and the leaves it was
+    # built from. The leaves are kept so an inclusion proof can be produced later for any one file
+    # without rebuilding the set from a case that has moved on since.
+    merkle_root: Mapped[str | None] = mapped_column(String(64))
+    merkle_leaves: Mapped[list | None] = mapped_column(JSON)
     review_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     generator_version: Mapped[str] = mapped_column(String(64), nullable=False, default="trustify-v1")
     manifest_storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)

@@ -34,6 +34,7 @@ from app.core.security import utcnow
 from app.models.entities import Alert, AuditLog, Case, Claim, Contradiction, Entity, EntityOccurrence, EntityRelation, Event, EvidenceFile, NormalizedRecord, ProcessingRun, ProcessingState, RecordRelation, Report, ReviewDecision, Transaction
 from app.graph.projection import build_case_graph
 from app.graph.connections import build_connection_graph, describe_connections
+from app.services import merkle
 from app.services.integrity import verify_chain
 from app.services.storage import get_report_artifact_path, publish_private_file, report_storage_key
 from app.services.trustify import create_receipt
@@ -1789,6 +1790,24 @@ def _append_verification(story: list[object], styles, db: Session, report: Repor
     # The record of actions above is only worth printing if somebody has checked it. The chain is
     # walked here, at generation time, so the document states a verified condition rather than
     # asserting that a mechanism exists.
+    # One value over the whole set of evidence, so a later copy cannot quietly cover fewer files.
+    from app.models.entities import TrustifyReceipt as _Receipt
+
+    receipt = db.scalar(select(_Receipt).where(_Receipt.report_id == report.id))
+    if receipt is not None and receipt.merkle_root:
+        story.append(Spacer(1, 4 * mm))
+        story.append(Paragraph("The set of evidence this report covers", styles["Heading2"]))
+        story.append(Paragraph(
+            f"Evidence set root: <b>{_safe(receipt.merkle_root)}</b> over {len(receipt.merkle_leaves or [])} file(s). "
+            f"{_safe(merkle.WHAT_IT_PROVES)}",
+            styles["BodyText"],
+        ))
+        story.append(Paragraph(
+            "<font size=7 color='#6b6258'>A short proof can be produced showing that any single one of these files "
+            "was in this set, without disclosing the hashes of the others.</font>",
+            styles["BodyText"],
+        ))
+
     story.append(Spacer(1, 4 * mm))
     story.append(Paragraph("The record of actions", styles["Heading2"]))
     verification = verify_chain(db, report.case_id)

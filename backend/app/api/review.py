@@ -13,7 +13,7 @@ from app.services.cases import require_case_access
 from app.services.integrity import verify_chain
 from app.services import report_view
 from app.services.reporting import create_report_record, get_report_path
-from app.services.trustify import verify_receipt
+from app.services.trustify import inclusion_proof, verify_receipt
 from app.services.review import apply_review
 from app.workers.tasks import generate_report_task
 
@@ -167,6 +167,21 @@ def report_findings(case_id: str, report_id: str, current_user: CurrentUser, db:
             "valid for anything that cites them."
         ),
     }
+
+
+@router.get("/trustify/reports/{report_id}/evidence/{evidence_id}/proof")
+def evidence_inclusion_proof(case_id: str, report_id: str, evidence_id: str, current_user: CurrentUser, db: DbSession) -> dict:
+    """Prove one evidence file was in the set this report covered, without revealing the rest.
+
+    A court can be shown that this file was in the case at report time using a handful of sibling
+    hashes. The other files' hashes stay out of it -- they are not the court's to see, and may
+    belong to people who are not on trial.
+    """
+    require_case_access(db, case_id, current_user)
+    result = inclusion_proof(db, case_id, report_id, evidence_id)
+    audit(db, action="trustify.inclusion_proof", object_type="evidence", object_id=evidence_id, case_id=case_id, outcome="success" if result.get("available") else "unavailable", actor_id=current_user.id, details={"report_id": report_id})
+    db.commit()
+    return result
 
 
 @router.get("/trustify/reports/{report_id}/verify")
