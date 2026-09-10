@@ -57,7 +57,7 @@ from app.schemas.grounded import (
 )
 from app.core.security import utcnow
 from app.graph import analytics
-from app.services import case_assistant, entity_summary, record_review, relationship_builder, temporal
+from app.services import case_assistant, entity_profile, entity_summary, record_review, relationship_builder, temporal
 from app.services.audit import audit
 from app.services.cases import require_case_access
 from app.services.grounded_pipeline import GROUNDED_PIPELINE_VERSION, UI_STAGE_ORDER
@@ -717,6 +717,32 @@ def communication_bursts(case_id: str, current_user: CurrentUser, db: DbSession)
 
 
 # --------------------------------------------------------------------------- case assistant
+
+
+@router.get("/entities/{entity_id}/profile")
+def read_entity_profile(case_id: str, entity_id: str, current_user: CurrentUser, db: DbSession) -> dict:
+    """Everything this case records about one identity, and whether another case knows it too.
+
+    Only cases the reader can already open are named. An identifier appearing in two cases is a
+    lead to follow with the officer holding the other one; nothing of that case's content is
+    described here.
+    """
+    require_case_access(db, case_id, current_user)
+    profile = entity_profile.build(db, case_id, entity_id, current_user)
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity not found in this case")
+    audit(
+        db,
+        action="grounded.entity_profile",
+        object_type="entity",
+        object_id=entity_id,
+        case_id=case_id,
+        outcome="success",
+        actor_id=current_user.id,
+        details={"other_cases": len(profile.other_cases)},
+    )
+    db.commit()
+    return profile.to_dict()
 
 
 @router.get("/entities/{entity_id}/summary")

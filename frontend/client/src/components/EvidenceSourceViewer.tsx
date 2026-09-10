@@ -21,6 +21,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileWarning, Loader2, Minus, Plus, X } from "lucide-react";
 import EntitySummaryCard from "@/components/EntitySummaryCard";
+import EntityProfilePanel from "@/components/EntityProfilePanel";
 import { getOriginalObjectUrl, getPageObjectUrl, getSourceView, type SourceLine, type SourceTarget, type SourceViewRecord } from "@/api/sourceView";
 
 export type SourceRequest = {
@@ -164,7 +165,12 @@ function LineSource({ lines, truncated, jumpToMark }: { lines: SourceLine[]; tru
   </div>;
 }
 
-export default function EvidenceSourceViewer({ request, close }: { request: SourceRequest | null; close: () => void }) {
+export default function EvidenceSourceViewer({ request, close, onOpenSource }: {
+  request: SourceRequest | null;
+  close: () => void;
+  /** Lets a row inside the panel retarget it at a different place in the evidence. */
+  onOpenSource?: (next: { evidenceId: string; target: SourceTarget; title: string; subtitle?: string }) => void;
+}) {
   const [view, setView] = useState<SourceViewRecord | null>(null);
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -275,8 +281,11 @@ export default function EvidenceSourceViewer({ request, close }: { request: Sour
         <span><FileWarning className="mx-auto text-[#a33831]" size={28}/><p className="mt-3 max-w-sm text-[11px] leading-5 text-[#76695e]">{error}</p></span>
       </div>}
 
-      {request.entityId && <div className="border-b border-[#eadfd3] bg-[#f7f2e9] px-5 pb-1 pt-4">
+      {request.entityId && <div className="border-b border-[#eadfd3] bg-[#f7f2e9] px-5 pb-5 pt-4">
         <EntitySummaryCard caseId={request.caseId} entityId={request.entityId}/>
+        {/* The summary answers the question; this is the record behind the answer. Both sit above
+            the evidence because the reader clicked a name, not a line. */}
+        <EntityProfilePanel caseId={request.caseId} entityId={request.entityId} openSource={onOpenSource}/>
       </div>}
 
       {view && !loading && <>

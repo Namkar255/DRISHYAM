@@ -374,7 +374,11 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
 
     <Trace />
     <RelationDrawer relation={openRelation} caseId={caseId} onClose={() => setOpenRelation(null)} onReviewed={load} say={say} onOpenSource={openRelationSource} />
-    <EvidenceSourceViewer request={sourceRequest} close={() => setSourceRequest(null)} />
+    <EvidenceSourceViewer
+      request={sourceRequest}
+      close={() => setSourceRequest(null)}
+      onOpenSource={(next) => setSourceRequest({ caseId, entityId: sourceRequest?.entityId ?? null, ...next })}
+    />
     <EntityDrawer entity={openEntity} caseId={caseId} onClose={() => setOpenEntity(null)} say={say} />
   </div>;
 }

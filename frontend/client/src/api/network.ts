@@ -56,3 +56,39 @@ export type EntitySummaryRecord = {
 export async function getEntitySummary(caseId: string, entityId: string): Promise<EntitySummaryRecord> {
   return (await apiClient.get(`${base(caseId)}/entities/${entityId}/summary`)).data;
 }
+
+/** One way the identity was written down, and where it was written that way. */
+export type EntityAlias = { value: string; evidence: string | null; field_name: string | null; stated_role: string | null };
+
+export type EntityAppearance = {
+  occurrence_id: string; evidence_id: string; evidence: string | null; place: string | null;
+  observed_value: string; field_name: string | null; stated_role: string | null;
+  confidence: number; source_reference: Record<string, unknown>;
+};
+
+export type EntityConnection = {
+  relation_id: string; relation_type: string; meaning: string; directed: boolean; outgoing: boolean;
+  other_id: string; other_label: string; other_type: string;
+  evidence_id: string; evidence: string | null; place: string | null;
+  observed_at: string | null; time_precision: string; confidence: number;
+  verification_status: string; source_reference: Record<string, unknown>;
+};
+
+export type EntityMoment = {
+  when: string; precision: string; statement: string;
+  evidence_id: string; evidence: string | null; place: string | null; source_reference: Record<string, unknown>;
+};
+
+export type EntityOtherCase = { case_id: string; case_number: string; title: string; status: string; written_as: string };
+
+export type EntityProfileRecord = {
+  entity_id: string; label: string; entity_type: string; normalized_value: string;
+  aliases: EntityAlias[]; appearances: EntityAppearance[]; connections: EntityConnection[];
+  timeline: EntityMoment[]; other_cases: EntityOtherCase[]; roles: string[]; unreviewed: number;
+  alias_caveat: string; other_case_caveat: string; profile_version: string;
+};
+
+/** Everything this case records about one identity. Assembled by the server from stored rows. */
+export async function getEntityProfile(caseId: string, entityId: string): Promise<EntityProfileRecord> {
+  return (await apiClient.get(`${base(caseId)}/entities/${entityId}/profile`)).data;
+}
