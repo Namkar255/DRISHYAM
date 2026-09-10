@@ -12,8 +12,8 @@
  * Every row opens at its source. Nothing here is written by a model, so every line can be checked.
  */
 import { useEffect, useState } from "react";
-import { ChevronRight, Clock, FileText, Layers, Link2, Loader2, Users } from "lucide-react";
-import { getEntityProfile, type EntityProfileRecord } from "@/api/network";
+import { ChevronRight, Clock, FileText, Globe2, Layers, Link2, Loader2, Users } from "lucide-react";
+import { getEntityProfile, getIdentityElsewhere, type EntityProfileRecord, type IdentityElsewhere } from "@/api/network";
 import { targetFromReference, type SourceTarget } from "@/api/sourceView";
 
 type OpenSource = (request: { evidenceId: string; target: SourceTarget; title: string; subtitle?: string }) => void;
@@ -51,6 +51,83 @@ function SourceRow({ onOpen, children }: { onOpen?: () => void; children: React.
       <span className="min-w-0 flex-1">{children}</span>
       <ChevronRight size={13} className="mt-1 shrink-0 text-[#c3b6a8] transition group-hover:text-[#8f3f37]" />
     </button>
+  );
+}
+
+/**
+ * Whether a force this reader cannot see is already looking for the same identity.
+ *
+ * The section above it lists cases the reader can already open. This is the other half: a district
+ * whose file they may never see. It is answerable at all only because the shared ledger holds
+ * nothing but a keyed digest, a case reference and a contact — there is no field in the reply that
+ * could carry what that case is about, which is the point rather than a limitation to apologise for.
+ *
+ * Deliberately a button. Asking is an access event the server records, and a check that ran on its
+ * own every time somebody opened a profile would fill the audit log with questions nobody asked.
+ */
+function Elsewhere({ caseId, entityId, label }: { caseId: string; entityId: string; label: string }) {
+  const [answer, setAnswer] = useState<IdentityElsewhere | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => { setAnswer(null); setFailed(false); }, [caseId, entityId]);
+
+  const ask = () => {
+    setAsking(true);
+    setFailed(false);
+    getIdentityElsewhere(caseId, entityId)
+      .then(setAnswer)
+      .catch(() => setFailed(true))
+      .finally(() => setAsking(false));
+  };
+
+  return (
+    <Section icon={Globe2} title="Known to another force">
+      {!answer && !failed && (
+        <>
+          <Empty>
+            The shared ledger can say whether another force holds this identity, without either of you seeing the
+            other&rsquo;s case. Asking is recorded against this case.
+          </Empty>
+          <button
+            onClick={ask}
+            disabled={asking}
+            className="mt-3 rounded-lg border border-[#dbcbbd] bg-white px-3 py-2 text-[10px] font-bold text-[#8f302b] transition hover:border-[#b36b62] hover:bg-[#fff7f1] disabled:opacity-60"
+          >
+            {asking ? "Checking the shared ledger…" : `Check the shared ledger for ${label}`}
+          </button>
+        </>
+      )}
+
+      {failed && <Empty>The shared ledger could not be reached. Nothing about this identity was sent.</Empty>}
+
+      {answer && !answer.available && (
+        <p className="rounded-xl border border-[#dcd4ca] bg-[#f6f3ee] p-3 text-[9px] leading-5 text-[#6f6258]">
+          {answer.note}
+        </p>
+      )}
+
+      {answer && answer.available && (
+        <>
+          {answer.matches.length === 0 ? (
+            <Empty>{answer.note}</Empty>
+          ) : (
+            answer.matches.map((match) => (
+              <div key={`${match.case_reference}-${match.published_at}`} className="border-b border-[#f0e6da] py-2 last:border-0">
+                <span className="mono block text-[9px] font-bold text-[#8f3f37]">{match.case_reference}</span>
+                <span className="block text-[10px] text-[#2e2520]">{match.contact}</span>
+                <span className="mono block text-[9px] text-[#847468]">
+                  published {new Date(match.published_at).toLocaleDateString()} · matched on {match.your_identity}
+                </span>
+              </div>
+            ))
+          )}
+          <p className="mt-3 rounded-xl border border-[#d6e2ea] bg-[#f3f8fb] p-3 text-[9px] leading-5 text-[#365c70]">
+            {answer.caveat}
+          </p>
+        </>
+      )}
+    </Section>
   );
 }
 
@@ -226,6 +303,9 @@ export default function EntityProfilePanel({ caseId, entityId, openSource }: {
           ))
         )}
       </Section>
+
+      {/* ------------------------------------------------------------ known to a force you cannot see */}
+      <Elsewhere caseId={caseId} entityId={entityId} label={profile.label}/>
     </div>
   );
 }

@@ -57,7 +57,7 @@ from app.schemas.grounded import (
 )
 from app.core.security import utcnow
 from app.graph import analytics
-from app.services import case_assistant, entity_profile, entity_summary, record_review, relationship_builder, temporal
+from app.services import case_assistant, entity_profile, entity_summary, ledger, record_review, relationship_builder, temporal
 from app.services.audit import audit
 from app.services.cases import require_case_access
 from app.services.grounded_pipeline import GROUNDED_PIPELINE_VERSION, UI_STAGE_ORDER
@@ -716,6 +716,13 @@ def communication_bursts(case_id: str, current_user: CurrentUser, db: DbSession)
     ]
 
 
+LEDGER_CAVEAT = (
+    "The shared ledger holds only a keyed digest of each identifier, a case reference and a contact. It can say "
+    "that another force holds this identity; it cannot say what their case is, what they found, or whether the two "
+    "are related. That is a conversation to have with the officer named."
+)
+
+
 # --------------------------------------------------------------------------- case assistant
 
 
@@ -743,6 +750,60 @@ def read_entity_profile(case_id: str, entity_id: str, current_user: CurrentUser,
     )
     db.commit()
     return profile.to_dict()
+
+
+@router.get("/entities/{entity_id}/elsewhere")
+def read_entity_elsewhere(case_id: str, entity_id: str, current_user: CurrentUser, db: DbSession) -> dict:
+    """Whether a force this reader has no access to is already looking for the same identity.
+
+    The profile's own "known to other cases" section lists cases the reader can already open. This
+    is the other half, and the harder one: an identifier held by a district whose file this reader
+    may never see. The ledger can answer it because it holds nothing but keyed digests -- the reply
+    is a case reference and an officer to ring, and there is no field in it that could carry
+    anything about what that case contains.
+
+    Asking is itself an access event and is recorded as one. A reader who runs this check has
+    learned that another force's case exists, which is not nothing, even when the answer is no.
+    """
+    case = require_case_access(db, case_id, current_user)
+    entity = db.scalar(select(Entity).where(Entity.id == entity_id, Entity.case_id == case_id))
+    if entity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity not found in this case")
+
+    try:
+        found = ledger.matches_for_identity(db, case, entity)
+    except ledger.LedgerClosed:
+        # Not an error to the reader: the ledger being off is a deployment decision, and a profile
+        # that failed to load because of it would be worse than one that says the check is unavailable.
+        return {
+            "available": False,
+            "matches": [],
+            "note": ledger.CLOSED_GATE,
+            "caveat": LEDGER_CAVEAT,
+        }
+
+    audit(
+        db,
+        action="ledger.identity_check",
+        object_type="entity",
+        object_id=entity_id,
+        case_id=case_id,
+        outcome="success",
+        actor_id=current_user.id,
+        details={"matches": len(found)},
+    )
+    db.commit()
+    return {
+        "available": True,
+        "matches": [item.to_dict() for item in found],
+        "note": (
+            f"{len(found)} other case(s) hold this identity."
+            if found
+            else "No case published to the shared ledger holds this identity. That is not a statement about cases "
+            "whose force has not published to it."
+        ),
+        "caveat": LEDGER_CAVEAT,
+    }
 
 
 @router.get("/entities/{entity_id}/summary")

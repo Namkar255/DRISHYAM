@@ -310,6 +310,41 @@ def matches_for_case(db: Session, case: Case) -> list[Match]:
     ]
 
 
+def matches_for_identity(db: Session, case: Case, entity: Entity) -> list[Match]:
+    """Which other cases on the ledger hold this one identity.
+
+    The per-case check answers "does this case overlap with anyone". This answers the question an
+    investigator actually asks, which is about one number in front of them: is this the same person
+    another district is already looking for.
+
+    An identity the resolver cannot canonicalise returns nothing rather than being digested from
+    whatever string happened to be typed. Two districts must compute the same digest from the same
+    identifier written differently, and a raw string does not have that property.
+    """
+    if not settings.ledger_publication_allowed:
+        raise LedgerClosed(CLOSED_GATE)
+
+    resolved = canonicalize_indicator(entity.entity_type, entity.value)
+    if resolved is None or entity.entity_type not in MATCHABLE_ENTITY_TYPES:
+        return []
+
+    rows = db.scalars(
+        select(LedgerEntry).where(
+            LedgerEntry.identifier_digest == digest(resolved.entity_type, resolved.canonical_value),
+            LedgerEntry.case_reference != case.case_number,
+        )
+    ).all()
+    return [
+        Match(
+            case_reference=row.case_reference,
+            contact=row.contact,
+            published_at=row.published_at.isoformat(),
+            your_identity=entity.value,
+        )
+        for row in sorted(rows, key=lambda item: item.published_at)
+    ]
+
+
 # --------------------------------------------------------------------------- verifying
 
 

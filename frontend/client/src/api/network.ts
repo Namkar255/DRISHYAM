@@ -97,3 +97,12 @@ export async function getEntityProfile(caseId: string, entityId: string): Promis
 export type CaseChronology = { incident_window_declared: boolean; incident_start: string | null; incident_end: string | null; contacts_placed: Record<string, number>; contacts_without_established_time: boolean; temporal_version: string };
 
 export async function getChronology(caseId: string): Promise<CaseChronology> { return (await apiClient.get(`/cases/${caseId}/grounded/temporal/chronology`)).data; }
+
+/** Whether a force this reader cannot see is already looking for the same identity. */
+export type ElsewhereMatch = { case_reference: string; contact: string; published_at: string; your_identity: string };
+export type IdentityElsewhere = { available: boolean; matches: ElsewhereMatch[]; note: string; caveat: string };
+
+/** Asking is itself an access event; the server records it. */
+export async function getIdentityElsewhere(caseId: string, entityId: string): Promise<IdentityElsewhere> {
+  return (await apiClient.get(`${base(caseId)}/entities/${entityId}/elsewhere`)).data;
+}

@@ -12,7 +12,11 @@ from decimal import Decimal, InvalidOperation
 
 from dateutil import parser as date_parser
 
-PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?91[\s-]?)?[6-9]\d{9}(?!\d)")
+# The leading zero is the STD-prefixed form -- 09876543210 -- which is how a great many Indian
+# numbers are written down, and it was silently unmatched: the lookbehind rejected the digits
+# after the zero because a digit preceded them. The resolver has always canonicalised that form,
+# so cross-case matching was relying on a spelling nothing ever extracted.
+PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?91[\s-]?|0)?[6-9]\d{9}(?!\d)")
 EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 UPI_PATTERN = re.compile(r"\b[a-zA-Z0-9._-]{2,120}@[a-zA-Z][a-zA-Z0-9.-]{1,80}\b")
 IFSC_PATTERN = re.compile(r"\b[A-Z]{4}0[A-Z0-9]{6}\b")
