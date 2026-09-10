@@ -968,6 +968,10 @@ def _numbered_findings(db: Session, case_id: str, snapshot: dict, redact=None) -
             "relation_id": relation.id,
             "statement": f"{subject} {meaning} {target}.",
             "file": files.get(relation.source_evidence_id, "an evidence file no longer in this case"),
+            # What a reader needs to open the finding where it was read, rather than being told a
+            # file name and a page number and left to go and find it.
+            "evidence_id": relation.source_evidence_id,
+            "source_reference": dict(relation.source_reference or {}),
             "place": place,
             "confidence": float(relation.confidence or 0),
             "verification": str(relation.verification_status or "machine_extracted").replace("_", " "),
@@ -1899,7 +1903,7 @@ PROFILE_TITLES = {
 }
 
 
-def _finalise(db: Session, report: Report, output: Path, story: list[object], case: dict) -> dict:
+def _finalise(db: Session, report: Report, output: Path, story: list[object], case: dict, findings: list[dict] | None = None) -> dict:
     """Render the story, seal it, and record where it went. Every profile ends here."""
     _apply_reference_table_rhythm(story)
     SimpleDocTemplate(
@@ -1915,6 +1919,9 @@ def _finalise(db: Session, report: Report, output: Path, story: list[object], ca
     report.status = ProcessingState.SUCCEEDED
     report.storage_key = report_storage_key(str(output.relative_to(settings.generated_reports_root)))
     report.generated_at = utcnow()
+    # Kept as printed. Recomputing this list later would renumber it as the case moved on, and a
+    # document that cites "DRISHYAM finding F-07" would come to point at a different statement.
+    report.findings = findings or []
     report.failure_reason = None
     receipt = create_receipt(db, report, output)
     publish_private_file(output, report.storage_key, content_type="application/pdf")
@@ -2284,7 +2291,7 @@ def generate_report(report_id: str) -> dict:
                 profile_story = _build_handover(db, report, styles, snapshot, findings)
             else:
                 profile_story = _build_court_annexure(db, report, styles, snapshot, evidence_records)
-            return _finalise(db, report, output, profile_story, snapshot["case"])
+            return _finalise(db, report, output, profile_story, snapshot["case"], findings)
 
         entities_by_type = Counter(label for item in entity_records if (label := _entity_display(item.entity_type)))
         alerts_by_severity = Counter(item.severity.value for item in alert_records)
@@ -2563,7 +2570,7 @@ def generate_report(report_id: str) -> dict:
         conclusion_table = Table(conclusion_rows, colWidths=[55 * mm, 127 * mm], repeatRows=1)
         conclusion_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7b1e2b")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#c9c9c9")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 5), ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#fbf5ec"))]))
         story.extend([finding_table, Spacer(1, 5 * mm), Paragraph("Conflicting information / reviewable gaps", styles["Heading2"]), gap_table, Spacer(1, 5 * mm), Paragraph("Recommended next investigator actions", styles["Heading2"]), Paragraph("These prompts are derived from current evidence and review state. They are not legal conclusions or mandatory instructions.", styles["BodyText"]), recommendation_table, PageBreak(), Paragraph("Report conclusion", styles["Heading1"]), conclusion_table, Spacer(1, 7 * mm), Paragraph("Conclusion narrative", styles["NarrativeHeading"]), Spacer(1, 3.5 * mm), Paragraph(_controlled_conclusion(db.get(Case, report.case_id), evidence_count=len(evidence_records), event_count=len(snapshot["events"]), relationship_count=graph_metrics.get("edge_count", 0), alert_count=len(alert_records), review_count=len(reviews)), styles["NarrativeCallout"]), Paragraph("Important note", styles["Heading2"]), Paragraph("Use this report together with its listed evidence and review notes. Check important findings against the original source material before taking further action.", styles["BodyText"]), Spacer(1, 5 * mm), Paragraph("Caution", styles["Heading2"]), Paragraph("This report records source-linked evidence, machine-derived leads, and human-review states. It does not determine guilt, identity, truthfulness, legal admissibility, or a legal outcome, and it does not replace independent evidentiary verification.", styles["BodyText"]), ])
-        return _finalise(db, report, output, story, case)
+        return _finalise(db, report, output, story, case, numbered)
     except Exception as exc:
         db.rollback()
         report = db.get(Report, report_id)

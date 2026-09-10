@@ -21,3 +21,21 @@ export type ChainVerification = { case_id: string; status: "intact" | "broken" |
 
 /** Recomputes every hash. This is itself an action against the case and is recorded as one. */
 export async function verifyChain(caseId: string): Promise<ChainVerification> { return (await apiClient.get(`/cases/${caseId}/trustify/chain`)).data; }
+
+/** Reading a generated report in place: see `app/services/report_view.py`. */
+export type ReportPages = { pages: number; width: number; height: number; version: string };
+export type ReportMatch = { page: number; bbox: [number, number, number, number]; order: number };
+export type ReportSearch = { query: string; total: number; matches: ReportMatch[]; truncated: boolean; note: string };
+export type ReportFinding = { id: string; statement: string; file: string; place: string; evidence_id: string | null; source_reference: Record<string, unknown>; confidence: number; verification: string; load_bearing: boolean; openable: boolean; unopenable_reason?: string };
+
+/** Opening a report to read it is an access event and the server records it as one. */
+export async function getReportPages(caseId: string, reportId: string): Promise<ReportPages> { return (await apiClient.get(`/cases/${caseId}/reports/${reportId}/pages`)).data; }
+/** One report page as a blob URL. An <img src> cannot carry the bearer token, so the page is
+ * fetched like any other authorised read and handed to the browser as a blob. The caller revokes
+ * the URL when it is finished with it. */
+export async function getReportPageObjectUrl(caseId: string, reportId: string, page: number): Promise<string> {
+  const response = await apiClient.get(`/cases/${caseId}/reports/${reportId}/pages/${page}`, { responseType: "blob" });
+  return URL.createObjectURL(response.data as Blob);
+}
+export async function searchReport(caseId: string, reportId: string, q: string): Promise<ReportSearch> { return (await apiClient.get(`/cases/${caseId}/reports/${reportId}/search`, { params: { q } })).data; }
+export async function getReportFindings(caseId: string, reportId: string): Promise<{ report_id: string; version: number; findings: ReportFinding[]; note: string }> { return (await apiClient.get(`/cases/${caseId}/reports/${reportId}/findings`)).data; }

@@ -480,6 +480,10 @@ class Report(Base):
     # reader is being handed at all.
     profile: Mapped[str] = mapped_column(String(32), nullable=False, default="case_file")
     storage_key: Mapped[str | None] = mapped_column(String(1024), unique=True)
+    # The numbered findings exactly as this report printed them, each keeping the evidence file and
+    # the place inside it. Kept rather than recomputed: a relationship added or reviewed since would
+    # renumber the list, and F-07 in a filed document would come to mean a different statement.
+    findings: Mapped[list | None] = mapped_column(JSON)
     generated_by_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
