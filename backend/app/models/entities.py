@@ -429,6 +429,48 @@ class Alert(Base):
     __table_args__ = (Index("ix_alerts_case_status_severity", "case_id", "status", "severity"),)
 
 
+class LedgerEntry(Base):
+    """One identifier published to the shared ledger, as a hash and nothing else.
+
+    This is the only store in this product that several forces read and write. Everywhere else a
+    local hash chain is the honest answer, because there is one party and it is trusted; here the
+    parties are different districts who must be able to find a shared identifier without either
+    being able to read the other's case, or to quietly remove an entry once it is written.
+
+    **What is here and what is deliberately not.** The identifier itself never is: only a keyed
+    digest of it, which two districts sharing the key both compute to the same value. The case
+    reference and a contact are here, because the entire point is that somebody can pick up a phone.
+    No evidence, no names, no statement about what the case contains.
+
+    Chained like the audit log, so an entry cannot be removed or backdated by whoever holds the
+    store -- which is the property a shared ledger has to have and a plain table does not.
+    """
+
+    __tablename__ = "ledger_entries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    # HMAC-SHA256 over "type:canonical value", keyed with the secret the participating districts
+    # share. A plain digest would not do: the space of phone numbers is small enough to enumerate,
+    # so an unkeyed hash of one is the number itself with extra steps.
+    identifier_digest: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    case_reference: Mapped[str] = mapped_column(String(64), nullable=False)
+    contact: Mapped[str] = mapped_column(String(320), nullable=False)
+    published_by_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    # The case this was published from. Local bookkeeping so a case can withdraw what it published
+    # and can be told what it already has out there; never returned to another district.
+    source_case_id: Mapped[str | None] = mapped_column(ForeignKey("cases.id", ondelete="SET NULL"), index=True)
+    previous_hash: Mapped[str | None] = mapped_column(String(64))
+    entry_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        # One district publishing the same identifier for the same case twice adds nothing and
+        # would make the ledger's own counts meaningless.
+        UniqueConstraint("identifier_digest", "case_reference", name="uq_ledger_digest_case"),
+        Index("ix_ledger_published_at", "published_at"),
+    )
+
+
 class ReviewDecision(Base):
     __tablename__ = "review_decisions"
 

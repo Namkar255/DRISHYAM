@@ -66,7 +66,22 @@ class Settings(BaseSettings):
     external_evidence_transmission: Literal["disabled", "enabled"] = "disabled"
     semantic_correlation_enabled: bool = False
 
+    # The shared identifier ledger. Off by default and behind the same two independent switches the
+    # external-model gate uses, because publishing is the one action in this product that puts
+    # anything derived from a case outside it.
+    ledger_enabled: bool = False
+    ledger_publication: Literal["disabled", "enabled"] = "disabled"
+    # The key the participating districts share. Without it there is no ledger: an unkeyed digest of
+    # a phone number can be enumerated in an afternoon, so publishing one would be publishing the
+    # number. Absence of this key is treated as the gate being shut, not as a reason to fall back.
+    ledger_key: SecretStr | None = None
+
     model_config = SettingsConfigDict(env_file=(".env", ".env.trace-orb"), env_file_encoding="utf-8", extra="ignore")
+
+    @property
+    def ledger_publication_allowed(self) -> bool:
+        """Identifiers leave this case only when both switches are on and a shared key exists."""
+        return self.ledger_enabled and self.ledger_publication == "enabled" and bool(self.ledger_key)
 
     @property
     def groq_transmission_allowed(self) -> bool:
