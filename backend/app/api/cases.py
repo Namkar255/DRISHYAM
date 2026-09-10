@@ -5,7 +5,13 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
 from app.models.entities import Case, CaseMembership, Role, User
-from app.schemas.cases import CaseCreateRequest, CaseMemberRequest, CaseMemberResponse, CaseResponse
+from app.schemas.cases import (
+    CaseCreateRequest,
+    CaseMemberRequest,
+    CaseMemberResponse,
+    CaseResponse,
+    IncidentWindowRequest,
+)
 from app.services.audit import audit
 from app.services.cases import create_case_number, require_case_access
 
@@ -56,6 +62,49 @@ def list_cases(current_user: CurrentUser, db: DbSession) -> list[CaseResponse]:
 @router.get("/{case_id}", response_model=CaseResponse)
 def get_case(case_id: str, current_user: CurrentUser, db: DbSession) -> CaseResponse:
     case = require_case_access(db, case_id, current_user)
+    return CaseResponse.model_validate(case, from_attributes=True)
+
+
+@router.patch("/{case_id}/incident-window", response_model=CaseResponse)
+def set_incident_window(
+    case_id: str, payload: IncidentWindowRequest, current_user: CurrentUser, db: DbSession
+) -> CaseResponse:
+    """Declare, change or clear the span this case treats as the incident.
+
+    A case is usually opened before anybody knows when the incident happened, so this cannot be a
+    creation-only field. Until it is declared the case reports that no window exists and every
+    temporal reading stays silent; declaring it is what turns a list of timestamps into contact
+    placed before, during and after something.
+
+    Because it decides which side of the incident every record falls on, the change is audited with
+    both the old span and the new one. A reader who finds a finding surprising can see whether the
+    window moved under it.
+    """
+    case = require_case_access(db, case_id, current_user)
+    before = {
+        "date_range_start": case.date_range_start.isoformat() if case.date_range_start else None,
+        "date_range_end": case.date_range_end.isoformat() if case.date_range_end else None,
+    }
+    case.date_range_start = payload.date_range_start
+    case.date_range_end = payload.date_range_end
+    audit(
+        db,
+        action="case.incident_window_set",
+        object_type="case",
+        object_id=case.id,
+        case_id=case.id,
+        outcome="success",
+        actor_id=current_user.id,
+        details={
+            "previous": before,
+            "declared": {
+                "date_range_start": payload.date_range_start.isoformat() if payload.date_range_start else None,
+                "date_range_end": payload.date_range_end.isoformat() if payload.date_range_end else None,
+            },
+        },
+    )
+    db.commit()
+    db.refresh(case)
     return CaseResponse.model_validate(case, from_attributes=True)
 
 

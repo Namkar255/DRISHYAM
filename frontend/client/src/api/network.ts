@@ -92,3 +92,8 @@ export type EntityProfileRecord = {
 export async function getEntityProfile(caseId: string, entityId: string): Promise<EntityProfileRecord> {
   return (await apiClient.get(`${base(caseId)}/entities/${entityId}/profile`)).data;
 }
+
+/** How the case's contact record sits around the declared incident: `app/services/temporal.py`. */
+export type CaseChronology = { incident_window_declared: boolean; incident_start: string | null; incident_end: string | null; contacts_placed: Record<string, number>; contacts_without_established_time: boolean; temporal_version: string };
+
+export async function getChronology(caseId: string): Promise<CaseChronology> { return (await apiClient.get(`/cases/${caseId}/grounded/temporal/chronology`)).data; }
