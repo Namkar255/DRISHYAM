@@ -34,6 +34,7 @@ from app.core.security import utcnow
 from app.models.entities import Alert, AuditLog, Case, Claim, Contradiction, Entity, EntityOccurrence, EntityRelation, Event, EvidenceFile, NormalizedRecord, ProcessingRun, ProcessingState, RecordRelation, Report, ReviewDecision, Transaction
 from app.graph.projection import build_case_graph
 from app.graph.connections import build_connection_graph, describe_connections
+from app.services.integrity import verify_chain
 from app.services.storage import get_report_artifact_path, publish_private_file, report_storage_key
 from app.services.trustify import create_receipt
 
@@ -1729,7 +1730,7 @@ def _verification_id(report: Report) -> str:
     return f"TRU-{report.case_id[:8].upper()}-R{report.version}"
 
 
-def _append_verification(story: list[object], styles, report: Report, evidence_records: list) -> None:
+def _append_verification(story: list[object], styles, db: Session, report: Report, evidence_records: list) -> None:
     """How a reader checks that this document and its evidence are what they claim to be."""
     story.append(PageBreak())
     story.append(Paragraph("Verifying this document", styles["Heading1"]))
@@ -1748,6 +1749,37 @@ def _append_verification(story: list[object], styles, report: Report, evidence_r
         "A mismatch on either means the file has changed since this report was generated. It does not by itself say how.",
     ):
         story.append(Paragraph("• " + step, styles["BodyText"]))
+
+    # The record of actions above is only worth printing if somebody has checked it. The chain is
+    # walked here, at generation time, so the document states a verified condition rather than
+    # asserting that a mechanism exists.
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("The record of actions", styles["Heading2"]))
+    verification = verify_chain(db, report.case_id)
+    story.append(
+        Paragraph(
+            f"Every action recorded against this case carries the hash of the action before it, so an entry that "
+            f"is altered or removed breaks every hash after it. That chain was recomputed when this report was "
+            f"generated: <b>{_safe(verification.statement)}</b>",
+            styles["BodyText"],
+        )
+    )
+    for item in verification.breaks[:5]:
+        story.append(
+            Paragraph(
+                f"• Entry {item.position} of {verification.entries} ({_safe(item.action)}, recorded "
+                f"{_safe(item.recorded_at)}): {_safe(item.detail)}",
+                styles["BodyText"],
+            )
+        )
+    story.append(
+        Paragraph(
+            "<font size=7 color='#6b6258'>Checked under " + _safe(verification.verification_version) +
+            ". The check covers the record of actions above; it says nothing about the evidence files themselves, "
+            "which are covered by the hashes below.</font>",
+            styles["BodyText"],
+        )
+    )
 
     story.append(Spacer(1, 4 * mm))
     story.append(Paragraph("Evidence hash manifest", styles["Heading2"]))
@@ -2079,7 +2111,7 @@ def _build_court_annexure(db: Session, report: Report, styles, snapshot: dict, e
     table = Table(rows, colWidths=[36 * mm, 58 * mm, 56 * mm, 32 * mm], repeatRows=1)
     table.setStyle(_report_table_style(header="slate"))
     story.extend([table, Spacer(1, 4 * mm)])
-    _append_verification(story, styles, report, evidence_records)
+    _append_verification(story, styles, db, report, evidence_records)
     _append_certificate(story, styles, snapshot, report, evidence_records)
     _append_limits(story, styles, snapshot, analytical=False)
     return story

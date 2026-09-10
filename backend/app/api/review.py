@@ -10,6 +10,7 @@ from app.schemas.reports import ReportRequest, ReportResponse
 from app.schemas.review import ReviewRequest, ReviewResponse
 from app.services.audit import audit
 from app.services.cases import require_case_access
+from app.services.integrity import verify_chain
 from app.services.reporting import create_report_record, get_report_path
 from app.services.trustify import verify_receipt
 from app.services.review import apply_review
@@ -82,6 +83,33 @@ def verify_report(case_id: str, report_id: str, current_user: CurrentUser, db: D
     audit(db, action="trustify.verify", object_type="report", object_id=report_id, case_id=case_id, outcome=result["status"], actor_id=current_user.id)
     db.commit()
     return result
+
+
+@router.get("/trustify/chain")
+def verify_audit_chain(case_id: str, current_user: CurrentUser, db: DbSession) -> dict:
+    """Walk this case's audit chain and report whether it holds.
+
+    Every hash is recomputed from the entry's stored fields and compared with the value sealed
+    against it, and each entry is checked to follow the one before. Where it breaks, the exact
+    entry is named: "something is wrong somewhere" is not evidence anybody can act on.
+
+    Verifying is itself an action against the case, so it is recorded — which means the next
+    verification has one more entry to check than this one did.
+    """
+    require_case_access(db, case_id, current_user)
+    result = verify_chain(db, case_id)
+    audit(
+        db,
+        action="integrity.verify_chain",
+        object_type="case",
+        object_id=case_id,
+        case_id=case_id,
+        outcome=result.status,
+        actor_id=current_user.id,
+        details={"entries": result.entries, "verified": result.verified},
+    )
+    db.commit()
+    return result.to_dict()
 
 
 @router.get("/trustify/summary")
