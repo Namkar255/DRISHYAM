@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, Check, FileSearch, Loader2, Network, RefreshCw, Route, ShieldCheck, Users, X } from "lucide-react";
 import { getApiErrorMessage } from "@/api/client";
 import EvidenceSourceViewer from "@/components/EvidenceSourceViewer";
+import { CONFIDENCE_TONES, confidenceTitle, readConfidence } from "@/lib/confidence";
 import { targetFromReference } from "@/api/sourceView";
 import {
   getEntityRelationSummary, getEntityRelations, getImportantEntities, getNetworkBridges, getNetworkCommunities, getNetworkOverview, getNetworkPath, getNetworkSubgraph, reviewEntityRelation,
@@ -165,7 +166,8 @@ function RelationDrawer({ relation, caseId, onClose, onReviewed, say, onOpenSour
       ["Source location", sourceLocation(relation.source_reference)],
       ["Observed at", relation.observed_at ? new Date(relation.observed_at).toLocaleString() : "Time not established"],
       ["Time precision", readable(relation.time_precision)],
-      ["Confidence", relation.confidence.toFixed(2)],
+      // The phrase is what a reader can weigh; the figure stays reachable rather than removed.
+      ["How firmly stated", readConfidence(relation.confidence).phrase + " (" + relation.confidence.toFixed(2) + ")"],
       ["Verification", readable(relation.verification_status)],
     ]} />
     <button onClick={() => onOpenSource?.(relation)} className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-[#dfd0c0] bg-[#fffaf4] px-3 py-2 text-[9px] font-bold text-[#8f302b] transition hover:border-[#b36b62] hover:bg-[#fff2ef]"><FileSearch size={12}/>Open this place in the file</button></Card>
@@ -333,7 +335,7 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
       {/* The three rankings often agree on who is first and differ only in the score beneath it, and
           a confidence floor can drop half the entities without changing the top card. Saying what is
           on screen is how a reader sees that a control did anything at all. */}
-      <p className="mb-3 text-[9px] leading-4 text-[#8a7d71]">Ranked by <b className="text-[#6b5b51]">{readable(metric.replace("_centrality", ""))}</b> · showing <b className="text-[#6b5b51]">{important.length}</b> {important.length === 1 ? "entity" : "entities"}{minConfidence > 0 ? <> whose relationships are at least <b className="text-[#6b5b51]">{minConfidence.toFixed(1)}</b> confident</> : " at every confidence"}.</p>
+      <p className="mb-3 text-[9px] leading-4 text-[#8a7d71]">Ranked by <b className="text-[#6b5b51]">{readable(metric.replace("_centrality", ""))}</b> · showing <b className="text-[#6b5b51]">{important.length}</b> {important.length === 1 ? "entity" : "entities"}{minConfidence > 0 ? <> whose relationships are at least <b className="text-[#6b5b51]">{readConfidence(minConfidence).phrase}</b></> : " at every confidence"}.</p>
       {important.length === 0 ? <Blank title="Nothing ranked yet" detail="Ranking needs at least one stated relationship between two resolved identities." /> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{important.map((record) => <ImportanceCard key={record.entity_id} record={record} onOpen={() => setOpenEntity(record)} onOpenSource={() => openEntitySource(record.entity_id, record.label)} />)}</div>}
     </div>
 
@@ -352,7 +354,7 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
         <label className="min-w-[190px] flex-1"><small className="mb-1 block text-[8px] font-bold uppercase tracking-[.1em] text-[#8a7d71]">To</small><select value={pathTo} onChange={(event) => setPathTo(event.target.value)} className="w-full rounded-lg border border-[#ded0c0] bg-white px-2.5 py-2 text-[10px] text-[#42342c] outline-none focus:border-[#bd8177]"><option value="">Select an entity</option>{canvas.nodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
         <Button tone="burgundy" onClick={findPath} disabled={!pathFrom || !pathTo}><ArrowRight size={13} /> Trace</Button>
       </div>
-      {path && <div className="mt-3 rounded-xl border border-[#e6d9c9] bg-[#fbf7f0] p-3">{path.found ? <><p className="text-[10px] font-bold text-[#2e2520]">{path.nodes.map((node) => node.label).join("  →  ")}</p><div className="mt-2 flex flex-wrap gap-1.5"><Pill tone="blue">{path.edges.length} steps</Pill><Pill tone={path.weakest_link_confidence >= 0.8 ? "green" : "amber"}>Weakest link {path.weakest_link_confidence?.toFixed(2)}</Pill></div><p className="mt-2 text-[8px] leading-4 text-[#94867a]">{path.caveat}</p></> : <p className="text-[9px] leading-5 text-[#8a5f1c]">{path.reason}</p>}</div>}
+      {path && <div className="mt-3 rounded-xl border border-[#e6d9c9] bg-[#fbf7f0] p-3">{path.found ? <><p className="text-[10px] font-bold text-[#2e2520]">{path.nodes.map((node) => node.label).join("  →  ")}</p><div className="mt-2 flex flex-wrap gap-1.5"><Pill tone="blue">{path.edges.length} steps</Pill><Pill tone={path.weakest_link_confidence >= 0.8 ? "green" : "amber"}><span title={confidenceTitle(path.weakest_link_confidence)}>Weakest link: {readConfidence(path.weakest_link_confidence).phrase}</span></Pill></div><p className="mt-2 text-[8px] leading-4 text-[#94867a]">{path.caveat}</p></> : <p className="text-[9px] leading-5 text-[#8a5f1c]">{path.reason}</p>}</div>}
     </Card>
 
     <div><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><Eyebrow>Relationship observations / one row is one source statement</Eyebrow>
@@ -365,7 +367,7 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
           <td className="py-3"><span className="inline-flex items-center gap-1.5"><i className="h-1.5 w-1.5 rounded-full" style={{ background: relationTone(relation.relation_type) }} />{readable(relation.relation_type)}</span></td>
           <td className="py-3">{readable(relation.basis)}</td>
           <td className="mono py-3 text-[8px] text-[#8a7d71]">{sourceLocation(relation.source_reference)}</td>
-          <td className="py-3">{relation.confidence.toFixed(2)}</td>
+          <td className="py-3"><span title={confidenceTitle(relation.confidence)} className={"inline-flex rounded-full border px-2 py-0.5 text-[9px] font-bold " + CONFIDENCE_TONES[readConfidence(relation.confidence).tone]}>{readConfidence(relation.confidence).phrase}</span></td>
           <td className="py-3"><Pill tone={verificationTone(relation.verification_status)}>{readable(relation.verification_status)}</Pill></td>
           <td className="py-3 pr-4 text-right"><Button tone="quiet" onClick={() => setOpenRelation(relation)}>Details</Button><span className="ml-2 inline-block"><Button tone="quiet" onClick={() => openRelationSource(relation)}>Open in file</Button></span></td>
         </tr>)}</tbody>

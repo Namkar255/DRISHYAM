@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DbSession
@@ -11,7 +12,7 @@ from app.schemas.review import ReviewRequest, ReviewResponse
 from app.services.audit import audit
 from app.services.cases import require_case_access
 from app.services.integrity import verify_chain
-from app.services import report_view
+from app.services import report_questions, report_view
 from app.services.reporting import create_report_record, get_report_path
 from app.services.trustify import inclusion_proof, verify_receipt
 from app.services.review import apply_review
@@ -131,6 +132,25 @@ def report_search(case_id: str, report_id: str, current_user: CurrentUser, db: D
     report, path = _readable_report(case_id, report_id, current_user, db)
     result = report_view.search(path, q)
     audit(db, action="report.search", object_type="report", object_id=report.id, case_id=case_id, outcome="success", actor_id=current_user.id, details={"query": result.query, "total": result.total})
+    db.commit()
+    return result.to_dict()
+
+
+class ReportQuestion(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+
+
+@router.post("/reports/{report_id}/ask")
+def ask_report(case_id: str, report_id: str, payload: ReportQuestion, current_user: CurrentUser, db: DbSession) -> dict:
+    """Ask about this report, answered from this report and this case and nowhere else.
+
+    There is no outbound call in this path to configure or forget to disable. Questions of fact go
+    to the case assistant, which reads the case's own rows; questions about the document return the
+    report's own words; anything else is declined in a sentence that says why.
+    """
+    report, path = _readable_report(case_id, report_id, current_user, db)
+    result = report_questions.answer(db, report, path, payload.question)
+    audit(db, action="report.question", object_type="report", object_id=report.id, case_id=case_id, outcome="success", actor_id=current_user.id, details={"kind": result.kind})
     db.commit()
     return result.to_dict()
 

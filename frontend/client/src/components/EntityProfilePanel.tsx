@@ -15,6 +15,7 @@ import { useEffect, useState } from "react";
 import { ChevronRight, Clock, FileText, Globe2, Layers, Link2, Loader2, Users } from "lucide-react";
 import { getEntityProfile, getIdentityElsewhere, type EntityProfileRecord, type IdentityElsewhere } from "@/api/network";
 import { targetFromReference, type SourceTarget } from "@/api/sourceView";
+import { confidenceTitle, readConfidence } from "@/lib/confidence";
 
 type OpenSource = (request: { evidenceId: string; target: SourceTarget; title: string; subtitle?: string }) => void;
 
@@ -246,7 +247,7 @@ export default function EntityProfilePanel({ caseId, entityId, openSource }: {
               </span>
               <span className="block text-[9px] leading-[1.55] text-[#847468]">{item.meaning}</span>
               <span className="mono block truncate text-[9px] text-[#a0917f]">
-                {item.evidence}{item.place ? ` — ${item.place}` : ""} · {item.verification_status.replace(/_/g, " ")}
+                {item.evidence}{item.place ? ` — ${item.place}` : ""} · {item.verification_status.replace(/_/g, " ")} · <span title={confidenceTitle(item.confidence)}>{readConfidence(item.confidence).phrase}</span>
               </span>
             </SourceRow>
           ))
