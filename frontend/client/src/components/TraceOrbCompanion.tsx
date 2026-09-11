@@ -18,6 +18,118 @@ import { askTraceOrb, askCase, type CaseAssistantAnswer, type TraceOrbLimitStatu
 
 const ORB_ASSET = "/trace-orb.png";
 
+// Where the companion sits, remembered per browser. A place somebody chose and then lost on every
+// reload is worse than one that never moved.
+const PLACE_KEY = "drishyam.trace-orb.place";
+
+const ORB_SIZE = 76;
+const PILL_SIZE = 150;
+// Never let the orb touch an edge. Flush against one it is hard to grab, and on a phone it sits
+// under the browser's own chrome.
+const EDGE = 20;
+// A press that wanders less than this is a press, not a drag. Without it, the small movement in
+// anybody's click would count as a drag and the companion would stop opening.
+const DRAG_THRESHOLD = 5;
+
+type Point = { x: number; y: number };
+
+function clampToViewport(point: Point, width: number, height: number): Point {
+  const maxX = Math.max(EDGE, window.innerWidth - width - EDGE);
+  const maxY = Math.max(EDGE, window.innerHeight - height - EDGE);
+  return {
+    x: Math.min(Math.max(point.x, EDGE), maxX),
+    y: Math.min(Math.max(point.y, EDGE), maxY),
+  };
+}
+
+function restingCorner(width: number, height: number): Point {
+  return clampToViewport({ x: window.innerWidth - width - EDGE, y: window.innerHeight - height - EDGE }, width, height);
+}
+
+/**
+ * Drag the companion anywhere, without losing the ability to click it.
+ *
+ * Pointer events rather than mouse events, so a finger works the same as a cursor, and the pointer
+ * is captured on press so a fast drag that outruns the element does not drop it mid-move.
+ *
+ * The position is clamped on every move and again on resize. An orb dragged to the far right and
+ * then met with a narrower window would otherwise sit off-screen with no way to bring it back --
+ * and the only control for reaching it is the orb itself.
+ */
+function useDraggable(width: number, height: number) {
+  const [point, setPoint] = useState<Point>(() => {
+    try {
+      const stored = window.localStorage.getItem(PLACE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored) as Point;
+        if (typeof parsed?.x === "number" && typeof parsed?.y === "number") {
+          return clampToViewport(parsed, width, height);
+        }
+      }
+    } catch {
+      // A stored place that cannot be read is not worth failing the companion over.
+    }
+    return restingCorner(width, height);
+  });
+
+  const grab = useRef<{ pointer: Point; origin: Point; moved: boolean } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  // Read by the click handler: a press that turned into a drag must not also open the panel.
+  const wasDragged = useRef(false);
+
+  useEffect(() => {
+    const onResize = () => setPoint((current) => clampToViewport(current, width, height));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [width, height]);
+
+  const onPointerDown = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.button !== 0 && event.pointerType === "mouse") return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    grab.current = { pointer: { x: event.clientX, y: event.clientY }, origin: point, moved: false };
+    wasDragged.current = false;
+    setDragging(true);
+  };
+
+  const onPointerMove = (event: React.PointerEvent<HTMLElement>) => {
+    const held = grab.current;
+    if (!held) return;
+    const dx = event.clientX - held.pointer.x;
+    const dy = event.clientY - held.pointer.y;
+    if (!held.moved && Math.hypot(dx, dy) > DRAG_THRESHOLD) held.moved = true;
+    if (!held.moved) return;
+    setPoint(clampToViewport({ x: held.origin.x + dx, y: held.origin.y + dy }, width, height));
+  };
+
+  const onPointerUp = (event: React.PointerEvent<HTMLElement>) => {
+    const held = grab.current;
+    grab.current = null;
+    setDragging(false);
+    if (!held) return;
+    wasDragged.current = held.moved;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // The capture is already gone; nothing to release.
+    }
+    if (held.moved) {
+      try {
+        window.localStorage.setItem(PLACE_KEY, JSON.stringify(point));
+      } catch {
+        // Storage can be blocked. The orb still moved; it just will not remember.
+      }
+    }
+  };
+
+  return {
+    style: { left: point.x, top: point.y, touchAction: "none" as const },
+    dragging,
+    handlers: { onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp },
+    /** True when the press that just ended was a drag, so the click should be ignored. */
+    consumedByDrag: () => wasDragged.current,
+  };
+}
+
 const helpPrompts = ["Website ka flow samjhao", "Trustify kya hai?", "Report download nahi ho rahi"];
 const casePrompts = [
   "Who is the most important entity?",
@@ -95,6 +207,8 @@ function CaseAnswer({ answer }: { answer: CaseAssistantAnswer }) {
 
 export default function TraceOrbCompanion({ caseId = null, caseLabel = null }: Props) {
   const [hidden, setHidden] = useState(() => window.localStorage.getItem("drishyam.trace-orb.hidden") === "true");
+  const orb = useDraggable(ORB_SIZE, ORB_SIZE);
+  const pill = useDraggable(PILL_SIZE, 36);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
@@ -161,7 +275,7 @@ export default function TraceOrbCompanion({ caseId = null, caseLabel = null }: P
     }]);
   };
 
-  if (hidden) return <button onClick={() => setVisibility(false)} className="fixed bottom-5 right-5 z-[70] inline-flex items-center gap-2 rounded-full border border-[#d8cbbb] bg-[#fffdf8]/95 px-3 py-2 text-[10px] font-extrabold text-[#7f1d1d] shadow-[0_12px_26px_rgba(77,43,30,.18)] backdrop-blur transition hover:-translate-y-0.5" aria-label="Show Trace Orb companion"><img src={ORB_ASSET} alt="" className="h-7 w-7 object-contain"/>Open companion</button>;
+  if (hidden) return <button {...pill.handlers} style={pill.style} onClick={() => { if (!pill.consumedByDrag()) setVisibility(false); }} className={`fixed z-[70] inline-flex items-center gap-2 rounded-full border border-[#d8cbbb] bg-[#fffdf8]/95 px-3 py-2 text-[10px] font-extrabold text-[#7f1d1d] shadow-[0_12px_26px_rgba(77,43,30,.18)] backdrop-blur transition ${pill.dragging ? "cursor-grabbing" : "cursor-grab hover:-translate-y-0.5"}`} aria-label="Show Trace Orb companion, drag to move"><img src={ORB_ASSET} alt="" className="h-7 w-7 object-contain"/>Open companion</button>;
 
   const scopeButton = (value: Scope, label: string, enabled: boolean) => <button
     key={value}
@@ -172,7 +286,7 @@ export default function TraceOrbCompanion({ caseId = null, caseLabel = null }: P
   >{label}</button>;
 
   return <>
-    <button onClick={() => setOpen(true)} className="group fixed bottom-5 right-5 z-[70] grid h-[76px] w-[76px] place-items-center rounded-full border border-[#8f302b]/35 bg-[#fffdf8]/95 shadow-[0_16px_34px_rgba(79,37,29,.23)] transition duration-200 hover:-translate-y-1 hover:shadow-[0_20px_40px_rgba(79,37,29,.28)] active:scale-[.97]" aria-label="Open Trace Orb assistant"><span className="absolute inset-1 rounded-full border border-[#e4d3c2]"/><img src={ORB_ASSET} alt="Trace Orb companion" className="relative h-[63px] w-[63px] object-contain transition duration-200 group-hover:scale-105"/>{caseId && <span className="absolute -top-0.5 right-0 rounded-full border border-[#8f302b]/40 bg-[#7f1d1d] px-1.5 py-0.5 text-[7px] font-extrabold tracking-[.08em] text-white shadow">CASE</span>}</button>
+    <button {...orb.handlers} style={orb.style} onClick={() => { if (!orb.consumedByDrag()) setOpen(true); }} className={`group fixed z-[70] grid h-[76px] w-[76px] place-items-center rounded-full border border-[#8f302b]/35 bg-[#fffdf8]/95 transition duration-200 ${orb.dragging ? "cursor-grabbing scale-[1.04] shadow-[0_24px_48px_rgba(79,37,29,.34)]" : "cursor-grab shadow-[0_16px_34px_rgba(79,37,29,.23)] hover:-translate-y-1 hover:shadow-[0_20px_40px_rgba(79,37,29,.28)] active:scale-[.97]"}`} aria-label="Open Trace Orb assistant, drag to move"><span className="absolute inset-1 rounded-full border border-[#e4d3c2]"/><img src={ORB_ASSET} alt="Trace Orb companion" className="relative h-[63px] w-[63px] object-contain transition duration-200 group-hover:scale-105"/>{caseId && <span className="absolute -top-0.5 right-0 rounded-full border border-[#8f302b]/40 bg-[#7f1d1d] px-1.5 py-0.5 text-[7px] font-extrabold tracking-[.08em] text-white shadow">CASE</span>}</button>
 
     {open && <div onMouseDown={() => setOpen(false)} className="fixed inset-0 z-[80] grid place-items-center bg-[#090a09]/70 p-4 backdrop-blur-md">
       <section onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Trace Orb terminal assistant" className="flex max-h-[min(760px,calc(100vh-2rem))] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#5e615d] bg-[#0e100f] text-[#f5f0e8] shadow-[0_30px_100px_rgba(0,0,0,.62)]">
