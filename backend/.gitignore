@@ -17,3 +17,6 @@ reports_out/
 backups/
 .test_data/
 .crosscase_preview_data/
+
+# Synthetic benchmark files copied out of the container for uploading by hand.
+benchmark-evidence/
