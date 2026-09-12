@@ -195,7 +195,9 @@
 @keyframes archive-pin-pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.35); opacity: .75; } }
 
 /* Homepage evidence journey: deliberate parchment depth, burgundy trace line, and GPU-safe evidence motion. */
-.journey-shell { min-height: 470vh; overflow: visible; }
+/* Roughly 67vh of scroll per stage. Tuned for seven; raised with the eighth so each step keeps
+   the same amount of travel rather than the whole journey getting faster. */
+.journey-shell { min-height: 535vh; overflow: visible; }
 .journey-sticky { position: sticky; top: 5.4rem; display: grid; height: calc(100svh - 5.4rem); grid-template-rows: auto minmax(0, 1fr) auto; gap: clamp(.75rem, 1.7vh, 1.35rem); align-content: stretch; overflow: visible; }
 .journey-sticky > .text-center { align-self: start; }.journey-sticky .journey-content-grid { min-height: 0; height: 100%; margin-top: 0; }.journey-sticky .journey-content-grid > * { min-height: 0; height: 100%; }.journey-sticky .journey-stage, .journey-sticky .journey-state-card { height: 100% !important; min-height: 0; }.journey-sticky .journey-rail { align-self: end; margin-top: 0; overflow: visible; padding-bottom: .25rem; }
 .journey-shell::before { content: ""; position: absolute; left: 9%; right: 9%; top: 3.2rem; height: 1px; background: linear-gradient(90deg, transparent, rgba(127,29,29,.42), transparent); }
@@ -203,7 +205,7 @@
 .journey-content-grid { align-items: stretch; }
 .journey-content-grid > * { min-width: 0; }
 .journey-sticky > .text-center { position: relative; z-index: 1; }
-.journey-sticky > .text-center::after { content: "EVIDENCE REGISTER / 07 STAGES"; display: block; margin: 1rem auto 0; width: fit-content; border: 1px solid #decdb9; background: #fffaf1; padding: .3rem .55rem; font-family: "DM Mono", monospace; font-size: 8px; font-weight: 700; letter-spacing: .12em; color: #7f1d1d; }
+.journey-sticky > .text-center::after { content: "EVIDENCE REGISTER / 08 STAGES"; display: block; margin: 1rem auto 0; width: fit-content; border: 1px solid #decdb9; background: #fffaf1; padding: .3rem .55rem; font-family: "DM Mono", monospace; font-size: 8px; font-weight: 700; letter-spacing: .12em; color: #7f1d1d; }
 .journey-rail { position: relative; border-top: 1px solid rgba(188,163,133,.42); border-bottom: 1px solid rgba(188,163,133,.28); background: linear-gradient(90deg, transparent, rgba(255,250,241,.72) 12%, rgba(255,250,241,.72) 88%, transparent); padding-top: 1.3rem; }
 .journey-rail::before { content: "TRACE LINE / ACTIVE STAGE"; position: absolute; right: 1rem; top: .45rem; font-family: "DM Mono", monospace; font-size: 8px; font-weight: 700; letter-spacing: .12em; color: #96726b; }
 .journey-state-card { position: relative; overflow: hidden; }
