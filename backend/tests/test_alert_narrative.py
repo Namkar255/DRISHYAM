@@ -270,3 +270,52 @@ def test_silence_is_measured_against_the_end_of_the_record_not_the_end_of_the_pa
     assert tuple(sorted((talking_pair.id, made[2].id))) not in silent, (
         "a pair still in contact at the end of the record has not gone silent"
     )
+
+
+# --------------------------------------------------------------------------- one handset, two numbers
+
+
+def test_two_numbers_on_one_handset_are_reported(worked_case) -> None:
+    """The strongest thing a CDR carries beyond the calls, and nothing else finds it."""
+    case, _ = worked_case
+    shared = [alert for alert in _alerts(case["id"]) if alert.rule_code == "SHARED_DEVICE"]
+
+    assert shared, "the benchmark CDR records two numbers against one handset"
+    assert "different numbers are recorded against the same handset" in shared[0].explanation
+
+
+def test_a_shared_handset_does_not_say_who_it_belongs_to(worked_case) -> None:
+    """One person with two numbers, a phone passed on, a SIM moved -- the record says none of it."""
+    case, _ = worked_case
+    for alert in _alerts(case["id"]):
+        if alert.rule_code != "SHARED_DEVICE":
+            continue
+        assert "does not say which of those it was" in alert.explanation
+        assert "same person" not in alert.explanation.lower()
+
+
+def test_the_handset_is_attributed_to_the_party_whose_record_it_is(client, case_factory) -> None:
+    """A call record's IMEI belongs to the calling party, not to the number they rang.
+
+    Attributing it to both would have this rule announce that two people share a handset on the
+    evidence of a single call between them -- the false accusation it exists to avoid.
+    """
+    case, headers = case_factory()
+    rows = "\n".join([
+        "a_party,b_party,date,time,duration_seconds,cell_id,call_type,imei",
+        "+919000000011,+919000000022,12/07/2026,19:47,60,MUM-0001,outgoing,111111111111111",
+        "+919000000011,+919000000033,12/07/2026,20:10,60,MUM-0001,outgoing,111111111111111",
+    ])
+    upload = client.post(
+        f"/api/v1/cases/{case['id']}/evidence",
+        headers=headers,
+        data={"source_category": "cdr"},
+        files={"file": ("one_caller.csv", rows.encode(), "text/csv")},
+    )
+    assert upload.status_code == 201, upload.text
+    _evaluate(case["id"])
+
+    shared = [alert for alert in _alerts(case["id"]) if alert.rule_code == "SHARED_DEVICE"]
+    assert shared == [], (
+        "one number called two others from one handset; nothing there is shared and no alert is due"
+    )

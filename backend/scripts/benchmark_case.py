@@ -61,6 +61,11 @@ ACCOUNT = "123456789012"
 UTR = "SYNBEN202607121947"
 
 # The two readings of one call. The FIR narrative and the call record disagree by half an hour.
+# The window an investigator would declare for this case: the evening of the incident. Several
+# rules only mean anything against a declared window -- contact "before the incident" has no
+# referent without one -- so the benchmark declares one rather than leaving those rules untested.
+INCIDENT_WINDOW = ("2026-07-12T21:00:00+00:00", "2026-07-12T23:59:00+00:00")
+
 FIR_CALL_TIME = "21:15"
 CDR_CALL_TIME = "21:45"
 
@@ -68,6 +73,14 @@ CDR_CALL_TIME = "21:45"
 # this case uses, which is what makes the fabrication measurable rather than a matter of opinion.
 SMUDGED_FIELD = "97?4?8821?"
 FABRICATION_PREFIX = "97"
+
+# Two of the numbers in this CDR are recorded against one handset.
+#
+# It is the single most useful thing a CDR carries beyond the calls themselves: one person running
+# two numbers leaves exactly this trace, and no amount of call-pattern analysis finds it. The third
+# number sits on its own handset so the rule has something to stay silent about.
+HANDSET_SHARED = "358240051111110"
+HANDSET_ALONE = "358240052222220"
 
 
 def _font(size: int, *, bold: bool = False):
@@ -111,6 +124,29 @@ class GroundTruth:
     conflicting_readings: tuple[str, ...]
     malformed_file: str
     degraded_files: tuple[str, ...] = field(default=())
+    # The entity types this ground truth lists *completely*, and therefore the only ones where
+    # precision means anything.
+    #
+    # Recall can be measured for every type: it asks how much of what is declared was found, and a
+    # partial list still answers that. Precision asks the opposite -- how much of what was found is
+    # real -- and that question needs the list to be exhaustive, or a correctly extracted entity
+    # nobody bothered to annotate is scored as an error.
+    #
+    # Locations, references and amounts are deliberately absent. The documents mention a district, a
+    # transaction reference and several sums that are perfectly real and simply not part of what
+    # this benchmark asserts, so measuring precision against them would punish the system for being
+    # right.
+    exhaustive_types: tuple[str, ...] = ("person", "vehicle", "organisation", "account", "phone", "upi")
+    # Patterns deliberately planted in the evidence, and the rule each one should raise.
+    #
+    # Measuring extraction is not the same as measuring detection. A benchmark that only counted
+    # entities would score full marks on a case whose rules never fired, so what was planted is
+    # declared here and the harness checks each one was actually found.
+    planted_patterns: tuple[tuple[str, str], ...] = (
+        ("SHARED_DEVICE", "two numbers in the CDR are recorded against one handset"),
+        ("PRE_INCIDENT_COMMUNICATION", "repeated contact in the hours before the declared incident"),
+        ("RELAY_CONTACT", "a contacts b, then b contacts c, inside a short window"),
+    )
 
 
 GROUND_TRUTH = GroundTruth(
@@ -258,13 +294,16 @@ def _cdr() -> Path:
     """A call detail record. The A-party and B-party columns are what make it a CDR."""
     target = OUTPUT / "cdr_synthetic.csv"
     rows = [
-        "a_party,b_party,date,time,duration_seconds,cell_id,call_type",
-        f"{SURESH_PHONE},{RAVI_PHONE},12/07/2026,19:47,212,MUM-BAN-0142,outgoing",
-        f"{SURESH_PHONE},{RAVI_PHONE},12/07/2026,20:14,96,MUM-BAN-0142,outgoing",
-        f"{SURESH_PHONE},{MOHAN_PHONE},12/07/2026,20:51,143,MUM-AND-0207,outgoing",
+        "a_party,b_party,date,time,duration_seconds,cell_id,call_type,imei",
+        f"{SURESH_PHONE},{RAVI_PHONE},12/07/2026,19:47,212,MUM-BAN-0142,outgoing,{HANDSET_SHARED}",
+        f"{SURESH_PHONE},{RAVI_PHONE},12/07/2026,20:14,96,MUM-BAN-0142,outgoing,{HANDSET_SHARED}",
+        f"{SURESH_PHONE},{MOHAN_PHONE},12/07/2026,20:51,143,MUM-AND-0207,outgoing,{HANDSET_SHARED}",
         # The same call the FIR narrative places at 21:15. The record says 21:45.
-        f"{RAVI_PHONE},{SURESH_PHONE},12/07/2026,{CDR_CALL_TIME},64,MUM-AND-0207,incoming",
-        f"{MOHAN_PHONE},{RAVI_PHONE},12/07/2026,22:03,38,MUM-AND-0207,outgoing",
+        f"{RAVI_PHONE},{SURESH_PHONE},12/07/2026,{CDR_CALL_TIME},64,MUM-AND-0207,incoming,{HANDSET_ALONE}",
+        # Mohan's number appears on the handset Suresh's number uses. One person, two numbers, or
+        # one handset passed between two people -- the record says which numbers, never which of
+        # those it was.
+        f"{MOHAN_PHONE},{RAVI_PHONE},12/07/2026,22:03,38,MUM-AND-0207,outgoing,{HANDSET_SHARED}",
     ]
     target.write_text("\n".join(rows) + "\n", encoding="utf-8")
     return target
