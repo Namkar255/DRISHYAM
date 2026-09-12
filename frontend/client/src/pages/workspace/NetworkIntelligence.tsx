@@ -112,7 +112,7 @@ function ImportanceCard({ record, onOpen, onOpenSource }) {
  * dense one. Everything else — zoom, pan, filter, search — narrows what is drawn without ever
  * changing what is stated.
  */
-function NetworkCanvas({ nodes, edges, selected, onSelect, height = 520 }) {
+function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, height = 520 }) {
   const WIDTH = 900;
   const HEIGHT = 520;
 
@@ -419,6 +419,7 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, height = 520 }) {
               onPointerDown={(event) => startNodeDrag(event, node.id)}
               onPointerMove={onMove}
               onPointerUp={(event) => { const moved = drag.current?.moved; endDrag(); if (!moved) onSelect?.(active ? null : node.id); event.stopPropagation(); }}
+              onDoubleClick={(event) => { event.stopPropagation(); onOpen?.(node.id); }}
               onPointerEnter={() => setHovered(node.id)}
               onPointerLeave={() => setHovered((current) => (current === node.id ? null : current))}
             >
@@ -434,7 +435,7 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, height = 520 }) {
     </div>
 
     <p className="border-t border-[#eadfd3] px-4 py-2.5 text-[8px] leading-4 text-[#8a7d71]">
-      A thicker line means the source states the relationship more firmly. A dashed line is co-occurrence only: the source named both in one record and stated no relationship between them. A larger circle means this case records more observations involving that identity — it is a count of what was read, not a measure of importance or involvement. Drag a node to pin it, drag the background to pan, scroll to zoom.
+      A thicker line means the source states the relationship more firmly. A dashed line is co-occurrence only: the source named both in one record and stated no relationship between them. A larger circle means this case records more observations involving that identity — it is a count of what was read, not a measure of importance or involvement. Click a node to see what it connects to; double-click to open it where it was read. Drag a node to pin it, drag the background to pan, scroll to zoom.
     </p>
   </Card>;
 }
@@ -635,8 +636,23 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
   // Clicking a node does both things a reader wants at once: it dims the rest of the map to what
   // this entity touches, and it opens the evidence that put the entity on the map at all. Clicking
   // the selected node again clears both.
+  /**
+   * One click highlights. It does not open anything.
+   *
+   * Highlighting and opening the evidence used to happen together, which meant a reader who only
+   * wanted to see what a node connects to got a panel over the map they were reading. Seeing the
+   * neighbourhood is the cheaper question and deserves the cheaper gesture.
+   */
   const selectNode = (nodeId) => {
-    if (!nodeId || nodeId === selectedNode) { setSelectedNode(null); setSourceRequest(null); return; }
+    if (!nodeId || nodeId === selectedNode) { setSelectedNode(null); return; }
+    setSelectedNode(nodeId);
+  };
+
+  /** Two clicks open the identity where it was read. Deliberate, because it covers the map. */
+  const openNode = (nodeId) => {
+    if (!nodeId) return;
+    // Forced rather than toggled: the second click of a double-click would otherwise deselect the
+    // node it is about to open, leaving the panel describing something the map no longer marks.
     setSelectedNode(nodeId);
     const node = canvas.nodes.find((item) => item.id === nodeId);
     openEntitySource(nodeId, node?.label ?? "This entity");
@@ -672,7 +688,7 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
       {[0, 0.5, 0.8].map((value) => <Chip key={value} active={minConfidence === value} onClick={() => setMinConfidence(value)}>{value === 0 ? "All" : value.toFixed(1)}</Chip>)}
     </div>
 
-    <NetworkCanvas nodes={canvas.nodes} edges={canvas.edges} selected={selectedNode} onSelect={selectNode} />
+    <NetworkCanvas nodes={canvas.nodes} edges={canvas.edges} selected={selectedNode} onSelect={selectNode} onOpen={openNode} />
 
     <div><div className="mb-2 flex items-center gap-2"><Network size={14} className="text-[#8e2d28]" /><Eyebrow>Most important entities / review priority, not guilt</Eyebrow></div>
       {/* The three rankings often agree on who is first and differ only in the score beneath it, and
