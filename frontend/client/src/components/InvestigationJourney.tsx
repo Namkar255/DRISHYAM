@@ -81,79 +81,94 @@ const centre = (index: number) => (index + 0.5) / STAGE_COUNT;
 const card = "rounded-lg border border-[#ddcfbd] bg-[#fffaf2] p-2.5 shadow-sm";
 const chip = "rounded-md border border-[#dfcbb8] bg-[#f9efe3] px-2 py-1 mono text-[8px] font-bold text-[#7f1d1d]";
 
+/**
+ * The illustration half of a scene.
+ *
+ * It is a grid column rather than an absolutely placed box. The box was positioned by hand for the
+ * short captions this section used to carry; longer ones ran under it, and it ran under the
+ * "evidence view" badge. A column cannot overlap its neighbour however long the text beside it
+ * grows.
+ */
 function Stage({ children }: { children: React.ReactNode }) {
-  return <div className="absolute bottom-7 right-7 h-[210px] w-[42%] min-w-[205px] sm:right-12 sm:w-[43%]">{children}</div>;
+  return <div className="hidden h-full min-h-0 flex-col items-center justify-center sm:flex">{children}</div>;
 }
 
 function EvidenceScene({ stage }: { stage: number }) {
   const active = stages[stage];
   return <div className="journey-stage relative h-[330px] overflow-hidden rounded-[22px] border border-[#dfd4c5] bg-[#f4eee4] shadow-[0_24px_55px_rgba(84,60,32,.12)] lg:h-[380px]">
     <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_14%,rgba(180,119,96,.13),transparent_24%),radial-gradient(circle_at_84%_86%,rgba(182,151,103,.12),transparent_24%)]" />
-    <div className="absolute left-6 top-6 z-10 max-w-[230px]">
-      <p className="mono text-[9px] font-bold uppercase tracking-[.15em] text-[#7f1d1d]">Evidence journey / {active.number}</p>
-      <h3 className="display-serif mt-3 text-3xl tracking-[-.03em] text-[#29241f]">{active.line}</h3>
-      <p className="mt-3 text-[11px] leading-5 text-[#685f55]">{active.detail}</p>
-    </div>
     <div className="journey-dust absolute inset-0" aria-hidden="true"><i/><i/><i/><i/><i/></div>
 
-    <AnimatePresence mode="wait"><motion.div key={stage} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -7 }} transition={{ duration: .34, ease: [0.23, 1, 0.32, 1] }} className="absolute inset-0">
+    <div className="relative grid h-full grid-cols-1 gap-5 p-6 pt-[3.4rem] sm:grid-cols-[minmax(0,.92fr)_minmax(0,1.08fr)] sm:gap-7 sm:p-7 sm:pt-[3.6rem]">
+      <div className="z-10 flex min-h-0 flex-col justify-center">
+        <p className="mono text-[9px] font-bold uppercase tracking-[.15em] text-[#7f1d1d]">Evidence journey / {active.number}</p>
+        <h3 className="display-serif mt-3 text-[26px] leading-[1.08] tracking-[-.03em] text-[#29241f] lg:text-3xl">{active.line}</h3>
+        <p className="mt-3 text-[11px] leading-5 text-[#685f55]">{active.detail}</p>
+      </div>
+
+      <AnimatePresence mode="wait"><motion.div key={stage} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -7 }} transition={{ duration: .34, ease: [0.23, 1, 0.32, 1] }} className="relative min-h-0">
 
       {/* 01 — the file is sealed, and the seal is what the rest of the journey is checked against. */}
       {stage === 0 && <Stage>
-        <motion.div animate={{ rotate: 360 }} transition={{ duration: 11, repeat: Infinity, ease: "linear" }} className="absolute bottom-[46px] left-6 h-32 w-32 rounded-full border border-dashed border-[#aa6a62]" />
-        <div className="absolute bottom-[66px] left-[46px] grid h-[88px] w-[88px] place-items-center rounded-full border border-[#d2b9a2] bg-[#fffaf2] shadow-[0_14px_26px_rgba(90,57,30,.13)]">
-          <Lock size={26} className="text-[#7f1d1d]" />
-          <span className="mono mt-1 text-[7px] font-bold tracking-[.12em] text-[#7f1d1d]">ORIGINAL</span>
+        <div className="relative grid h-[132px] w-[132px] place-items-center">
+          <motion.div animate={{ rotate: 360 }} transition={{ duration: 11, repeat: Infinity, ease: "linear" }} className="absolute inset-0 rounded-full border border-dashed border-[#aa6a62]" />
+          <div className="grid h-[88px] w-[88px] place-items-center rounded-full border border-[#d2b9a2] bg-[#fffaf2] shadow-[0_14px_26px_rgba(90,57,30,.13)]">
+            <Lock size={26} className="text-[#7f1d1d]" />
+            <span className="mono mt-1 text-[7px] font-bold tracking-[.12em] text-[#7f1d1d]">ORIGINAL</span>
+          </div>
         </div>
-        <motion.div animate={{ x: [0, 8, 0], opacity: [.55, 1, .55] }} transition={{ duration: 2.1, repeat: Infinity }} className={`absolute bottom-2 right-0 ${chip} px-3 py-2`}>SHA-256 / 67E1B803</motion.div>
+        <motion.div animate={{ opacity: [.55, 1, .55] }} transition={{ duration: 2.1, repeat: Infinity }} className={`${chip} mt-4 px-3 py-2`}>SHA-256 / 67E1B803</motion.div>
       </Stage>}
 
       {/* 02 — reading is not just what was found but where it sits, which is the whole product. */}
       {stage === 1 && <Stage>
-        <div className="absolute bottom-4 right-3 grid h-28 w-24 place-items-center rounded-xl border border-[#d5c1ab] bg-[#fffaf2] shadow-[0_12px_24px_rgba(84,60,32,.12)]">
-          <Fingerprint size={26} className="text-[#7f1d1d]" />
-          <span className="mono text-[7px] font-bold text-[#7f1d1d]">SOURCE</span>
+        <div className="relative flex h-full w-full items-center justify-center">
+          <div className="grid h-24 w-20 shrink-0 place-items-center rounded-xl border border-[#d5c1ab] bg-[#fffaf2] shadow-[0_12px_24px_rgba(84,60,32,.12)]">
+            <Fingerprint size={24} className="text-[#7f1d1d]" />
+            <span className="mono text-[7px] font-bold text-[#7f1d1d]">SOURCE</span>
+          </div>
+          {[["+91 98765…", "page 1"], ["MH12DE1433", "row 14"], ["Linking Road", "line 6"], ["Suresh Yadav", "page 2"]].map(([value, place], index) =>
+            <motion.span
+              key={value}
+              initial={{ opacity: 0, x: 0, y: 0 }}
+              animate={{ opacity: [0, 1, 1, 0], x: [0, -34, -58, -70], y: [0, -44 + index * 30, -50 + index * 34, -54 + index * 36] }}
+              transition={{ duration: 3.4, delay: index * .42, repeat: Infinity, repeatDelay: .6 }}
+              className={`absolute ${chip} whitespace-nowrap`}
+            >{value} <span className="font-normal text-[#a07d6c]">· {place}</span></motion.span>
+          )}
         </div>
-        {[["+91 98765…", "page 1"], ["MH12DE1433", "row 14"], ["Linking Road", "line 6"], ["Suresh Yadav", "page 2"]].map(([value, place], index) =>
-          <motion.span
-            key={value}
-            initial={{ opacity: 0, x: 10, y: 8 }}
-            animate={{ opacity: [0, 1, 1, 0], x: [10, -24 - index * 6, -50 - index * 6, -66 - index * 6], y: [8, -4 - index * 17, -19 - index * 19, -31 - index * 19] }}
-            transition={{ duration: 3.4, delay: index * .42, repeat: Infinity, repeatDelay: .6 }}
-            className={`absolute bottom-[72px] right-[20px] ${chip} whitespace-nowrap`}
-          >{value} <span className="font-normal text-[#a07d6c]">· {place}</span></motion.span>
-        )}
       </Stage>}
 
       {/* 03 — the claim that is hardest to believe without seeing it, so it gets the clearest scene. */}
       {stage === 2 && <Stage>
-        {["+91 98765 43210", "919876543210", "09876543210", "98765 43210"].map((written, index) =>
-          <motion.span
-            key={written}
-            animate={{ opacity: [1, 1, .15], x: [0, 0, 46], y: [0, 0, 62 - index * 41] }}
-            transition={{ duration: 3.2, delay: index * .1, repeat: Infinity, repeatDelay: .5 }}
-            className={`absolute left-0 ${chip} whitespace-nowrap`}
-            style={{ top: `${8 + index * 27}px` }}
-          >{written}</motion.span>
-        )}
-        <motion.div
-          animate={{ scale: [.9, 1.06, .9] }}
-          transition={{ duration: 2.4, repeat: Infinity }}
-          className="absolute bottom-[54px] right-2 grid h-[76px] w-[132px] place-items-center rounded-xl border-2 border-[#7f1d1d] bg-[#7f1d1d] text-white shadow-[0_14px_26px_rgba(127,29,29,.24)]"
-        >
-          <span className="mono text-[9px] font-bold tracking-[.08em]">ONE IDENTITY</span>
-          <span className="mono mt-1 text-[8px] opacity-80">9876543210</span>
-        </motion.div>
-        <p className="absolute bottom-2 right-2 max-w-[150px] text-right text-[8px] leading-4 text-[#8a7d71]">Suresh Yadav and Suresh Yadava stay two.</p>
+        <div className="relative flex h-full w-full flex-col items-center justify-center gap-2">
+          {["+91 98765 43210", "919876543210", "09876543210", "98765 43210"].map((written, index) =>
+            <motion.span
+              key={written}
+              animate={{ opacity: [1, 1, .12], y: [0, 0, (1.5 - index) * 26] }}
+              transition={{ duration: 3.2, delay: index * .08, repeat: Infinity, repeatDelay: .5 }}
+              className={`${chip} whitespace-nowrap`}
+            >{written}</motion.span>
+          )}
+          <motion.div
+            animate={{ scale: [.94, 1.04, .94] }}
+            transition={{ duration: 2.4, repeat: Infinity }}
+            className="mt-2 grid h-[62px] w-[136px] place-items-center rounded-xl border-2 border-[#7f1d1d] bg-[#7f1d1d] text-white shadow-[0_14px_26px_rgba(127,29,29,.24)]"
+          >
+            <span className="mono text-[9px] font-bold tracking-[.08em]">ONE IDENTITY</span>
+            <span className="mono text-[8px] opacity-80">9876543210</span>
+          </motion.div>
+          <p className="mt-1 max-w-[170px] text-center text-[8px] leading-4 text-[#8a7d71]">Suresh Yadav and Suresh Yadava stay two.</p>
+        </div>
       </Stage>}
 
       {/* 04 — an edge is only an edge because a record says so, so the record rides on it. */}
       {stage === 3 && <Stage>
-        <div className="absolute bottom-6 right-0 grid w-full gap-2">
+        <div className="flex h-full w-full flex-col justify-center gap-2">
           {[["CALLED", "cdr_synthetic.csv · row 2"], ["TRANSFERRED TO", "transactions.csv · row 1"], ["USED VEHICLE", "fir_supplementary · page 1"]].map(([type, source], index) =>
             <motion.div key={type} initial={{ opacity: 0, x: 16 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: .5, delay: index * .12 }} className={card}>
               <p className="mono text-[8px] font-bold tracking-[.06em] text-[#7f1d1d]">{type}</p>
-              <p className="mono mt-1 text-[8px] text-[#8a7d71]">{source}</p>
+              <p className="mono mt-1 truncate text-[8px] text-[#8a7d71]">{source}</p>
             </motion.div>
           )}
         </div>
@@ -161,27 +176,32 @@ function EvidenceScene({ stage }: { stage: number }) {
 
       {/* 05 — position and fragility, which is where a case is most worth checking first. */}
       {stage === 4 && <Stage>
-        <svg viewBox="0 0 310 190" className="absolute inset-0 h-full w-full" aria-hidden="true">
-          <motion.path d="M38 138 C78 85 121 103 162 114 S221 58 264 70 M162 114 C198 163 242 164 278 142" fill="none" stroke="#8a2722" strokeWidth="2" strokeDasharray="4 7" animate={{ strokeDashoffset: [0, -42] }} transition={{ duration: 2.8, repeat: Infinity, ease: "linear" }} />
-        </svg>
-        {[["12.3%", "72.5%", false], ["30.3%", "47%", false], ["52.3%", "60%", true], ["72.2%", "37%", false], ["89.7%", "74.5%", false]].map(([left, top, hub], index) =>
-          <motion.span
-            key={String(left)}
-            animate={{ scale: hub ? [1, 1.22, 1] : [1, 1.1, 1] }}
-            transition={{ duration: 1.9, delay: index * .15, repeat: Infinity }}
-            style={{ left: String(left), top: String(top) }}
-            className={`absolute grid -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border-2 border-[#7f1d1d] shadow-[0_8px_16px_rgba(127,29,29,.16)] ${hub ? "h-12 w-12 bg-[#7f1d1d] text-white" : "h-9 w-9 bg-[#fff9f0] text-[#7f1d1d]"} text-[8px] font-extrabold`}
-          >{hub ? "HUB" : "•"}</motion.span>
-        )}
-        <span className={`absolute bottom-1 right-0 ${chip}`}>1 BRIDGE · CHECK FIRST</span>
+        <div className="relative h-full w-full">
+          <svg viewBox="0 0 310 190" preserveAspectRatio="none" className="absolute inset-x-0 top-1/2 h-[72%] w-full -translate-y-1/2" aria-hidden="true">
+            <motion.path d="M38 138 C78 85 121 103 162 114 S221 58 264 70 M162 114 C198 163 242 164 278 142" fill="none" stroke="#8a2722" strokeWidth="2" strokeDasharray="4 7" animate={{ strokeDashoffset: [0, -42] }} transition={{ duration: 2.8, repeat: Infinity, ease: "linear" }} vectorEffect="non-scaling-stroke" />
+          </svg>
+          {[["12%", "78%", false], ["30%", "50%", false], ["52%", "64%", true], ["72%", "38%", false], ["89%", "80%", false]].map(([left, top, hub], index) =>
+            <motion.span
+              key={String(left)}
+              animate={{ scale: hub ? [1, 1.2, 1] : [1, 1.1, 1] }}
+              transition={{ duration: 1.9, delay: index * .15, repeat: Infinity }}
+              style={{ left: String(left), top: String(top) }}
+              className={`absolute grid -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border-2 border-[#7f1d1d] shadow-[0_8px_16px_rgba(127,29,29,.16)] ${hub ? "h-11 w-11 bg-[#7f1d1d] text-white" : "h-8 w-8 bg-[#fff9f0] text-[#7f1d1d]"} text-[8px] font-extrabold`}
+            >{hub ? "HUB" : "•"}</motion.span>
+          )}
+          <span className={`absolute bottom-0 left-1/2 -translate-x-1/2 ${chip} whitespace-nowrap`}>1 BRIDGE · CHECK FIRST</span>
+        </div>
       </Stage>}
 
       {/* 06 — a pattern is only a lead if the reader can see what it was built from. */}
       {stage === 5 && <Stage>
-        <motion.div animate={{ rotate: [-3, 3, -3] }} transition={{ duration: 2.8, repeat: Infinity, ease: "easeInOut" }} className="absolute right-2 top-1 grid h-12 w-12 place-items-center rounded-xl bg-[#8a2722] text-white shadow-[0_14px_25px_rgba(127,29,29,.26)]">
-          <AlertTriangle size={22} />
-        </motion.div>
-        <div className="absolute bottom-5 right-0 grid w-[86%] gap-1.5">
+        <div className="flex h-full w-full flex-col justify-center gap-1.5">
+          <div className="mb-1 flex items-center gap-2">
+            <motion.span animate={{ rotate: [-4, 4, -4] }} transition={{ duration: 2.8, repeat: Infinity, ease: "easeInOut" }} className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#8a2722] text-white shadow-[0_10px_18px_rgba(127,29,29,.24)]">
+              <AlertTriangle size={16} />
+            </motion.span>
+            <span className="mono text-[8px] font-bold tracking-[.08em] text-[#8a2722]">SUDDEN SILENCE</span>
+          </div>
           {[["19:47", "Suresh called Ravi"], ["20:14", "Suresh called Ravi"], ["—", "then 14 hours with nothing recorded"]].map(([time, text], index) =>
             <motion.div key={text} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .45, delay: index * .16 }} className={card}>
               <p className="mono text-[8px] text-[#7f1d1d]">{time}</p>
@@ -193,39 +213,44 @@ function EvidenceScene({ stage }: { stage: number }) {
 
       {/* 07 — the step that separates what a machine read from what a case stands behind. */}
       {stage === 6 && <Stage>
-        <div className="absolute bottom-7 right-0 grid w-[88%] gap-2">
+        <div className="flex h-full w-full flex-col justify-center gap-2">
           {[["Confirmed", "#27633c", "#eef6f0"], ["Corrected", "#8a5f1c", "#fdf6e8"], ["Rejected", "#8a2722", "#fbeeec"]].map(([label, colour, background], index) =>
             <motion.div
               key={label}
               initial={{ opacity: 0, x: 14 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ duration: .45, delay: index * .14 }}
-              className="flex items-center justify-between rounded-lg border px-3 py-2.5"
+              className="flex items-center justify-between gap-2 rounded-lg border px-3 py-2"
               style={{ borderColor: `${colour}33`, background }}
             >
               <span className="mono text-[9px] font-bold" style={{ color: colour }}>{label}</span>
-              <span className="mono text-[8px] text-[#8a7d71]">SI Sharma · 14:22</span>
+              <span className="mono truncate text-[8px] text-[#8a7d71]">SI Sharma · 14:22</span>
             </motion.div>
           )}
+          <p className="mt-1 text-[8px] leading-4 text-[#8a7d71]">Every decision keeps its author and its time.</p>
         </div>
-        <p className="absolute bottom-1 right-0 text-[8px] leading-4 text-[#8a7d71]">Every decision keeps its author and its time.</p>
       </Stage>}
 
       {/* 08 — the finding is citable and the record is re-checkable by somebody who does not trust us. */}
       {stage === 7 && <Stage>
-        <motion.div animate={{ y: [4, -3, 4] }} transition={{ duration: 3.2, repeat: Infinity, ease: "easeInOut" }} className="absolute bottom-8 right-4 h-36 w-28 rounded-xl border border-[#d8c4ad] bg-[#fff9f0] shadow-[0_16px_30px_rgba(82,55,28,.14)]">
-          <span className="mono absolute left-4 top-5 text-[8px] font-bold text-[#7f1d1d]">F-01</span>
-          <span className="absolute left-4 right-4 top-12 h-px bg-[#c7ab91]" />
-          <span className="absolute left-4 right-7 top-16 h-px bg-[#c7ab91]" />
-          <span className="mono absolute left-4 top-[86px] text-[8px] font-bold text-[#7f1d1d]">F-02</span>
-          <span className="absolute left-4 right-4 top-[104px] h-px bg-[#c7ab91]" />
-          <span className="absolute left-4 right-9 top-[116px] h-px bg-[#c7ab91]" />
-        </motion.div>
-        <motion.div animate={{ opacity: [.6, 1, .6] }} transition={{ duration: 2.2, repeat: Infinity }} className={`absolute bottom-3 left-0 ${chip} px-3 py-2`}>CHAIN VERIFIED</motion.div>
-        <motion.div animate={{ opacity: [.6, 1, .6] }} transition={{ duration: 2.2, delay: .6, repeat: Infinity }} className={`absolute top-2 left-0 ${chip} px-3 py-2`}>SET ROOT FIXED</motion.div>
+        <div className="flex h-full w-full flex-col items-center justify-center gap-3">
+          <motion.div animate={{ y: [3, -3, 3] }} transition={{ duration: 3.2, repeat: Infinity, ease: "easeInOut" }} className="relative h-[122px] w-[104px] rounded-xl border border-[#d8c4ad] bg-[#fff9f0] shadow-[0_16px_30px_rgba(82,55,28,.14)]">
+            <span className="mono absolute left-3.5 top-4 text-[8px] font-bold text-[#7f1d1d]">F-01</span>
+            <span className="absolute left-3.5 right-3.5 top-10 h-px bg-[#c7ab91]" />
+            <span className="absolute left-3.5 right-6 top-[52px] h-px bg-[#c7ab91]" />
+            <span className="mono absolute left-3.5 top-[70px] text-[8px] font-bold text-[#7f1d1d]">F-02</span>
+            <span className="absolute left-3.5 right-3.5 top-[88px] h-px bg-[#c7ab91]" />
+            <span className="absolute left-3.5 right-8 top-[100px] h-px bg-[#c7ab91]" />
+          </motion.div>
+          <div className="flex flex-wrap justify-center gap-2">
+            <motion.span animate={{ opacity: [.6, 1, .6] }} transition={{ duration: 2.2, repeat: Infinity }} className={`${chip} px-2.5 py-1.5`}>CHAIN VERIFIED</motion.span>
+            <motion.span animate={{ opacity: [.6, 1, .6] }} transition={{ duration: 2.2, delay: .6, repeat: Infinity }} className={`${chip} px-2.5 py-1.5`}>SET ROOT FIXED</motion.span>
+          </div>
+        </div>
       </Stage>}
 
-    </motion.div></AnimatePresence>
+      </motion.div></AnimatePresence>
+    </div>
   </div>;
 }
 
