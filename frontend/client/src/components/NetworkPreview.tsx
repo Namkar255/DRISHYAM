@@ -48,11 +48,14 @@ const byId = Object.fromEntries(NODES.map((node) => [node.id, node]));
 export default function NetworkPreview() {
   return (
     <section id="network" className="relative overflow-hidden bg-[#202420] py-24 text-[#f6f1e7] lg:py-32">
+      {/* The map is atmosphere, so it has to end like atmosphere. At a fixed width it stopped on a
+          hard vertical line straight down the middle of the section, cutting the heading and the
+          cards below it in two. Fading it out means the eye never finds an edge to align against. */}
       <img
         src="/assets/reference-map_e5920fd1.png"
         alt=""
         aria-hidden="true"
-        className="absolute -left-20 top-0 h-full w-[45%] object-cover opacity-[.14] mix-blend-screen"
+        className="absolute -left-20 top-0 h-full w-[52%] object-cover opacity-[.14] mix-blend-screen [mask-image:linear-gradient(to_right,black_45%,transparent_100%)] [-webkit-mask-image:linear-gradient(to_right,black_45%,transparent_100%)]"
       />
       <img
         src="/assets/workspace-map-board_c063d31f.png"
