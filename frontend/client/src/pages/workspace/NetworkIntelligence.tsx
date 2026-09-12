@@ -10,11 +10,12 @@
  * right of a card at full weight the way the overview metrics use it.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, Check, Download, FileSearch, Loader2, Network, RefreshCw, Route, Search, ShieldCheck, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, Download, FileSearch, Link2, Loader2, Network, RefreshCw, Route, Search, ShieldCheck, Users, X } from "lucide-react";
 import { getApiErrorMessage } from "@/api/client";
 import EvidenceSourceViewer from "@/components/EvidenceSourceViewer";
 import { CONFIDENCE_TONES, confidenceTitle, readConfidence } from "@/lib/confidence";
 import { targetFromReference } from "@/api/sourceView";
+import { getGraph, type GraphRecord } from "@/api/analysis";
 import {
   getEntityRelationSummary, getEntityRelations, getImportantEntities, getNetworkBridges, getNetworkCommunities, getNetworkOverview, getNetworkPath, getNetworkSubgraph, reviewEntityRelation,
   type ImportanceMetric,
@@ -439,6 +440,44 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, height = 520 }) {
 }
 
 
+/**
+ * Which evidence files a single identifier appears in.
+ *
+ * This answers a different question from the map above it. The map asks which identities are
+ * connected to each other; this asks which files carry the same identifier — and those are not the
+ * same claim. A number appearing in four files links the files. It does not establish that one
+ * person is behind all four, and the caveat the server sends with each row says so.
+ *
+ * It moved here when the "Graph" tab was removed. That tab drew no graph, and this was the only
+ * thing on it the network view did not already say better.
+ */
+function SharedIdentifiers({ connections }: { connections: GraphRecord["connections"] }) {
+  const rows = connections ?? [];
+  if (!rows.length) {
+    return <Blank
+      title="No identifier is shared between files yet"
+      detail="This appears once the same identifier has been read out of more than one evidence file in this case."
+    />;
+  }
+
+  const tone = (band: string) => (band === "strong" ? "green" : band === "moderate" ? "amber" : "grey");
+
+  return <div className="space-y-2">
+    {rows.map((item) => <div key={`${item.identifier_label}-${item.identifier}`} className="rounded-xl border border-[#e6d9c9] bg-[#fffdf8] p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded-full border border-[#dfd0c0] bg-white px-2.5 py-1 text-[8px] font-bold uppercase tracking-wider text-[#8f3f37]">{item.identifier_label}</span>
+        <b className="mono text-[11px] font-bold text-[#382b25]">{item.identifier}</b>
+        <Pill tone={tone(item.strength_band)}>{item.strength_band} link</Pill>
+        <span className="text-[9px] text-[#8a7d71]">{item.evidence_count} file{item.evidence_count === 1 ? "" : "s"}</span>
+      </div>
+      <p className="mt-2 text-[9px] leading-5 text-[#6b5d52]">{item.sentence}</p>
+      <p className="mono mt-1 truncate text-[8px] text-[#9b8a7c]">{item.evidence_names.join(" · ")}</p>
+      {item.caveat && <p className="mt-1.5 text-[8px] leading-4 text-[#94867a]">{item.caveat}</p>}
+    </div>)}
+  </div>;
+}
+
+
 function Drawer({ title, eyebrow, onClose, children, wide = false }) {
   return <><button aria-label="Close detail" onClick={onClose} className="fixed inset-0 z-[70] bg-[#2e2520]/45 backdrop-blur-[1px]" />
     <aside className={`fixed inset-y-0 right-0 z-[71] flex w-full ${wide ? "max-w-[640px]" : "max-w-[560px]"} flex-col border-l border-[#e2d5c7] bg-[#fbf7f0] shadow-[-24px_0_80px_rgba(82,49,36,.22)]`}>
@@ -516,7 +555,7 @@ function EntityDrawer({ entity, caseId, onClose, say }) {
 }
 
 export default function NetworkIntelligence({ caseId, say }: { caseId: string; say: (message: string) => void }) {
-  const [data, setData] = useState({ overview: null, important: [], bridges: [], communities: [], summary: [], relations: [] });
+  const [data, setData] = useState({ overview: null, important: [], bridges: [], communities: [], summary: [], relations: [], connections: [] });
   const [metric, setMetric] = useState<ImportanceMetric>("betweenness_centrality");
   const [minConfidence, setMinConfidence] = useState(0);
   const [typeFilter, setTypeFilter] = useState("");
@@ -538,12 +577,13 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [overview, important, bridges, communities, summary, relationPage] = await Promise.all([
+      const [overview, important, bridges, communities, summary, relationPage, graph] = await Promise.all([
         getNetworkOverview(caseId), getImportantEntities(caseId, { metric, min_confidence: minConfidence, limit: 12 }),
         getNetworkBridges(caseId, minConfidence), getNetworkCommunities(caseId, minConfidence),
         getEntityRelationSummary(caseId), getEntityRelations(caseId, { limit: 300, relation_type: typeFilter || undefined }),
+        getGraph(caseId),
       ]);
-      setData({ overview, important, bridges, communities, summary, relations: relationPage.items });
+      setData({ overview, important, bridges, communities, summary, relations: relationPage.items, connections: graph.connections ?? [] });
     } catch (error) { notify.current(getApiErrorMessage(error, "The network could not be loaded for this case.")); }
     finally { setLoading(false); }
   }, [caseId, metric, minConfidence, typeFilter]);
@@ -650,6 +690,12 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
         {communities.length === 0 ? <p className="text-[9px] leading-5 text-[#88796d]">The network is not yet large enough to separate into groups.</p> : <div className="space-y-2">{communities.slice(0, 6).map((cluster) => <div key={cluster.community_id} className="rounded-xl border border-[#e6d9c9] bg-[#fbf7f0] p-3"><div className="flex items-center justify-between gap-2"><b className="text-[10px] text-[#2e2520]">Group {cluster.community_id + 1}</b><Pill tone="blue">{cluster.size} entities</Pill></div><p className="mt-1.5 text-[9px] leading-5 text-[#6b5d52]">{cluster.members.slice(0, 6).map((member) => member.label).filter(Boolean).join(", ")}{cluster.members.length > 6 ? ` and ${cluster.members.length - 6} more` : ""}</p></div>)}<p className="pt-1 text-[8px] leading-4 text-[#94867a]">{communities[0]?.caveat}</p></div>}
       </Card>
     </div>
+
+    <Card className="p-4 sm:p-5">
+      <div className="mb-1 flex items-center gap-2"><Link2 size={14} className="text-[#2b6b8b]" /><Eyebrow>Identifiers shared between files / a link between records, not between people</Eyebrow></div>
+      <p className="mb-3 text-[9px] leading-4 text-[#8a7d71]">The map above joins identities to each other. This says which evidence files carry the same identifier — a different and weaker claim, kept separate for that reason.</p>
+      <SharedIdentifiers connections={data.connections} />
+    </Card>
 
     <Card className="p-4 sm:p-5"><div className="mb-3 flex items-center gap-2"><Route size={14} className="text-[#365f70]" /><Eyebrow>Trace a connection / "no path" is a real answer</Eyebrow></div>
       <div className="flex flex-wrap items-end gap-2">
