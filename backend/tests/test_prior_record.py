@@ -86,7 +86,9 @@ def test_every_disposal_is_shown_not_only_the_convictions(client, recorded_case)
 
 def test_the_dataset_is_not_a_wall_of_convictions() -> None:
     """The demo data itself must not teach the inference the product refuses."""
-    outcomes = [record[9] for record in seed_prior_records.RECORDS]
+    # Unpacked rather than indexed: a positional index into this row silently read the wrong
+    # column once already, and a guard that reads the wrong column guards nothing.
+    outcomes = [disposal for *_, disposal, _disposed, _officer in seed_prior_records.RECORDS]
     assert outcomes.count("convicted") <= 1, (
         "a dataset of convictions makes the feature look impressive and teaches every viewer that a "
         "prior record is evidence of the present one"
