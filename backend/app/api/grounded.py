@@ -57,7 +57,7 @@ from app.schemas.grounded import (
 )
 from app.core.security import utcnow
 from app.graph import analytics
-from app.services import case_assistant, entity_profile, entity_summary, ledger, record_review, requisition, relationship_builder, temporal
+from app.services import case_assistant, entity_profile, entity_summary, ledger, prior_record, record_review, requisition, relationship_builder, temporal
 from app.services.audit import audit
 from app.services.cases import require_case_access
 from app.services.grounded_pipeline import GROUNDED_PIPELINE_VERSION, UI_STAGE_ORDER
@@ -774,6 +774,38 @@ def requisition_draft(case_id: str, current_user: CurrentUser, db: DbSession) ->
     )
     db.commit()
     return draft.to_dict()
+
+
+@router.get("/entities/{entity_id}/prior-record")
+def read_entity_prior_record(case_id: str, entity_id: str, current_user: CurrentUser, db: DbSession) -> dict:
+    """What the national record of registered cases already holds about this identity.
+
+    A different source from the shared ledger and a different question. The ledger says another
+    force is working a live case touching this identity and holds nothing else; this reads a store
+    that is entitled to hold the details of cases already registered.
+
+    Looking somebody up in a criminal record is an act worth recording, whatever it returns. An
+    officer who ran the check has learned something about a person that the case in front of them
+    did not contain.
+    """
+    require_case_access(db, case_id, current_user)
+    entity = db.scalar(select(Entity).where(Entity.id == entity_id, Entity.case_id == case_id))
+    if entity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity not found in this case")
+
+    found = prior_record.lookup(db, entity)
+    audit(
+        db,
+        action="prior_record.lookup",
+        object_type="entity",
+        object_id=entity_id,
+        case_id=case_id,
+        outcome="success",
+        actor_id=current_user.id,
+        details={"entries": len(found.entries)},
+    )
+    db.commit()
+    return found.to_dict()
 
 
 @router.get("/entities/{entity_id}/elsewhere")

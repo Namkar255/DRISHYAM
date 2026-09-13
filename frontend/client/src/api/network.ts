@@ -106,3 +106,27 @@ export type IdentityElsewhere = { available: boolean; matches: ElsewhereMatch[];
 export async function getIdentityElsewhere(caseId: string, entityId: string): Promise<IdentityElsewhere> {
   return (await apiClient.get(`${base(caseId)}/entities/${entityId}/elsewhere`)).data;
 }
+
+/** What the national record of registered cases holds about an identity. A different source from
+ * the shared ledger, and a different question: the ledger reports a live case another force is
+ * working; this reports cases already registered, with what became of each. */
+export type PriorRecordEntry = {
+  record_reference: string;
+  police_station: string;
+  district: string | null;
+  sections: string[];
+  registered_on: string;
+  disposal: string;
+  disposal_reading: string;
+  disposal_state: "open" | "closed" | "unknown";
+  disposal_on: string | null;
+  subject_name: string | null;
+  contact_officer: string | null;
+  source: string;
+};
+export type PriorRecordLookup = { identity: string; matched_on: string | null; entries: PriorRecordEntry[]; statement: string; caveat: string; version: string };
+
+/** Looking somebody up in a criminal record is recorded, whatever it returns. */
+export async function getPriorRecord(caseId: string, entityId: string): Promise<PriorRecordLookup> {
+  return (await apiClient.get(`${base(caseId)}/entities/${entityId}/prior-record`)).data;
+}
