@@ -129,7 +129,7 @@ def test_a_search_too_short_to_mean_anything_is_refused(client, generated) -> No
 
 def test_searching_is_recorded(client, generated) -> None:
     case, headers, report_id = generated
-    client.get(f"{_base(case['id'], report_id)}/search", headers=headers, params={"q": "Suresh"})
+    client.get(f"{_base(case['id'], report_id)}/search", headers=headers, params={"q": "Yash"})
 
     entries = client.get(f"/api/v1/cases/{case['id']}/audit", headers=headers).json()
     assert "report.search" in [item["action"] for item in entries]

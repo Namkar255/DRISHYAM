@@ -41,13 +41,13 @@ def _at(year: int, month: int, day: int) -> datetime:
 #  sections, registered, disposal, disposed, officer)
 RECORDS = [
     (
-        "phone", "+919876543210", "Suresh Yadav",
+        "phone", "+919876543210", "Yash Kumar Gupta",
         "FIR 0231/2024", "Andheri East Police Station", "Mumbai Suburban",
         ["BNS 318(4)", "IT Act 66D"], _at(2024, 8, 14),
         "chargesheeted", _at(2025, 1, 9), "PI A. Deshmukh",
     ),
     (
-        "phone", "+919876543210", "Suresh Yadav",
+        "phone", "+919876543210", "Yash Kumar Gupta",
         "FIR 0044/2022", "Kurla Police Station", "Mumbai Suburban",
         ["BNS 316(2)"], _at(2022, 2, 3),
         "acquitted", _at(2023, 11, 27), "PI S. Rane",

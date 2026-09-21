@@ -167,7 +167,7 @@ def _apply_field(record: NormalizedRecordDraft, name: str, provenance: FieldProv
             setattr(record, name, [str(item) for item in value])
         return
     # A mapping field. Without this the fallback below would stringify the whole dict onto
-    # the record, and "{'Suresh Yadav': 'accused'}" is not a role.
+    # the record, and "{'Yash Kumar Gupta': 'accused'}" is not a role.
     if name in MAPPING_FIELDS:
         if isinstance(value, dict):
             setattr(record, name, {str(key): str(item) for key, item in value.items()})

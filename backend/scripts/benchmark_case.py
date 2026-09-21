@@ -17,7 +17,7 @@ Four deliberate hard cases, each of which a careless system fails in a specific,
   1. A handwritten field the page does not resolve. Completing "97?4?8821?" into a whole number is
      fabrication, and no phone beginning 97 exists anywhere else in this case, so an invented one
      is unambiguous.
-  2. Two people whose names differ by one letter. "Suresh Yadav" and "Suresh Yadava" are named in
+  2. Two people whose names differ by one letter. "Yash Kumar Gupta" and "Yash Kumar Gupt" are named in
      different sources as different people. Merging them collapses two nodes into a false one.
   3. A timestamp two sources disagree about. Both readings must survive; silently choosing one
      hides a discrepancy an investigator needs to see.
@@ -42,13 +42,13 @@ SYNTHETIC_BANNER = "SYNTHETIC BENCHMARK MATERIAL - FICTIONAL - NOT A REAL RECORD
 
 # --------------------------------------------------------------------------- the cast
 
-SURESH = "Suresh Yadav"
-SURESH_LOOKALIKE = "Suresh Yadava"  # a different person, named in a different source
+YASH = "Yash Kumar Gupta"
+YASH_LOOKALIKE = "Yash Kumar Gupt"  # a different person, named in a different source
 RAVI = "Ravi Kumar"
 MOHAN = "Mohan Lal"
 PRIYA = "Priya Sharma"
 
-SURESH_PHONE = "+919876543210"
+YASH_PHONE = "+919876543210"
 RAVI_PHONE = "+919988776655"
 MOHAN_PHONE = "+919123456789"
 
@@ -151,11 +151,11 @@ class GroundTruth:
 
 GROUND_TRUTH = GroundTruth(
     entities=(
-        ExpectedEntity("phone", "9876543210", SURESH_PHONE, ("fir_primary", "cdr", "screenshot_plain", "transactions")),
+        ExpectedEntity("phone", "9876543210", YASH_PHONE, ("fir_primary", "cdr", "screenshot_plain", "transactions")),
         ExpectedEntity("phone", "9988776655", RAVI_PHONE, ("fir_primary", "cdr", "screenshot_dark")),
         ExpectedEntity("phone", "9123456789", MOHAN_PHONE, ("cdr", "surveillance")),
-        ExpectedEntity("person", "suresh yadav", SURESH, ("fir_primary", "screenshot_plain")),
-        ExpectedEntity("person", "suresh yadava", SURESH_LOOKALIKE, ("surveillance",)),
+        ExpectedEntity("person", "yash kumar gupta", YASH, ("fir_primary", "screenshot_plain")),
+        ExpectedEntity("person", "yash kumar gupt", YASH_LOOKALIKE, ("surveillance",)),
         ExpectedEntity("person", "ravi kumar", RAVI, ("fir_primary", "fir_supplementary")),
         ExpectedEntity("person", "mohan lal", MOHAN, ("fir_supplementary", "surveillance")),
         ExpectedEntity("person", "priya sharma", PRIYA, ("fir_primary",)),
@@ -169,12 +169,12 @@ GROUND_TRUTH = GroundTruth(
         ExpectedEntity("account", ACCOUNT, ACCOUNT, ("transactions", "fir_supplementary")),
     ),
     relations=(
-        ExpectedRelation(SURESH_PHONE, "CALLED", RAVI_PHONE, "two calls in the CDR before the incident window"),
-        ExpectedRelation(SURESH_PHONE, "CALLED", MOHAN_PHONE, "one call in the CDR"),
+        ExpectedRelation(YASH_PHONE, "CALLED", RAVI_PHONE, "two calls in the CDR before the incident window"),
+        ExpectedRelation(YASH_PHONE, "CALLED", MOHAN_PHONE, "one call in the CDR"),
         ExpectedRelation(PLATE_A, "LOCATED_AT", "Linking Road", "the surveillance note places the vehicle there twice"),
         ExpectedRelation(MOHAN, "USED_VEHICLE", PLATE_A, "the supplementary report names him as the driver"),
     ),
-    must_not_merge=(("suresh yadav", "suresh yadava"),),
+    must_not_merge=(("yash kumar gupta", "yash kumar gupt"),),
     forbidden_phone_prefix=FABRICATION_PREFIX,
     conflicting_readings=(FIR_CALL_TIME, CDR_CALL_TIME),
     malformed_file="malformed",
@@ -197,12 +197,12 @@ def _fir_primary() -> Path:
         "District: Mumbai Suburban        Date: 12/07/2026",
         "",
         f"Complainant: {PRIYA}",
-        f"Accused (1): {SURESH}, contact {SURESH_PHONE}",
+        f"Accused (1): {YASH}, contact {YASH_PHONE}",
         f"Accused (2): {RAVI}, contact {RAVI_PHONE}",
         f"Organisation named in the complaint: {ORG}",
         "",
         "BRIEF FACTS",
-        f"The complainant states that she was contacted by {SURESH} on {SURESH_PHONE} regarding",
+        f"The complainant states that she was contacted by {YASH} on {YASH_PHONE} regarding",
         f"an employment offer at {ORG}. She states that a call was received at {FIR_CALL_TIME} hrs on",
         "12/07/2026 and that she was asked to travel to Andheri East the same evening.",
         f"She further states that {RAVI} spoke to her on {RAVI_PHONE} and confirmed the arrangement.",
@@ -260,11 +260,11 @@ def _screenshot(name: str, *, dark: bool, blur: float) -> Path:
     image = Image.new("RGB", (900, 1200), background)
     draw = ImageDraw.Draw(image)
     draw.text((28, 24), SYNTHETIC_BANNER, fill=ink, font=_font(17, bold=True))
-    draw.text((28, 60), SURESH_PHONE if not dark else RAVI_PHONE, fill=ink, font=_font(26, bold=True))
+    draw.text((28, 60), YASH_PHONE if not dark else RAVI_PHONE, fill=ink, font=_font(26, bold=True))
 
     messages = (
         [
-            ("12/07/2026 20:40", f"{SURESH} here. Reporting for the Andheri East work."),
+            ("12/07/2026 20:40", f"{YASH} here. Reporting for the Andheri East work."),
             ("12/07/2026 20:52", f"Send the fee to {UPI} before you travel."),
             ("12/07/2026 21:05", "Confirm once it is done."),
         ]
@@ -295,12 +295,12 @@ def _cdr() -> Path:
     target = OUTPUT / "cdr_synthetic.csv"
     rows = [
         "a_party,b_party,date,time,duration_seconds,cell_id,call_type,imei",
-        f"{SURESH_PHONE},{RAVI_PHONE},12/07/2026,19:47,212,MUM-BAN-0142,outgoing,{HANDSET_SHARED}",
-        f"{SURESH_PHONE},{RAVI_PHONE},12/07/2026,20:14,96,MUM-BAN-0142,outgoing,{HANDSET_SHARED}",
-        f"{SURESH_PHONE},{MOHAN_PHONE},12/07/2026,20:51,143,MUM-AND-0207,outgoing,{HANDSET_SHARED}",
+        f"{YASH_PHONE},{RAVI_PHONE},12/07/2026,19:47,212,MUM-BAN-0142,outgoing,{HANDSET_SHARED}",
+        f"{YASH_PHONE},{RAVI_PHONE},12/07/2026,20:14,96,MUM-BAN-0142,outgoing,{HANDSET_SHARED}",
+        f"{YASH_PHONE},{MOHAN_PHONE},12/07/2026,20:51,143,MUM-AND-0207,outgoing,{HANDSET_SHARED}",
         # The same call the FIR narrative places at 21:15. The record says 21:45.
-        f"{RAVI_PHONE},{SURESH_PHONE},12/07/2026,{CDR_CALL_TIME},64,MUM-AND-0207,incoming,{HANDSET_ALONE}",
-        # Mohan's number appears on the handset Suresh's number uses. One person, two numbers, or
+        f"{RAVI_PHONE},{YASH_PHONE},12/07/2026,{CDR_CALL_TIME},64,MUM-AND-0207,incoming,{HANDSET_ALONE}",
+        # Mohan's number appears on the handset Yash's number uses. One person, two numbers, or
         # one handset passed between two people -- the record says which numbers, never which of
         # those it was.
         f"{MOHAN_PHONE},{RAVI_PHONE},12/07/2026,22:03,38,MUM-AND-0207,outgoing,{HANDSET_SHARED}",
@@ -315,7 +315,7 @@ def _transactions() -> Path:
         "date,amount,currency,sender,receiver,account_number,reference,narration",
         f"2026-07-12 20:58,25000.00,INR,{PRIYA},{UPI},{ACCOUNT},{UTR},Synthetic transfer for benchmark",
         f"2026-07-12 21:34,18000.00,INR,{PRIYA},{UPI},{ACCOUNT},SYNBEN202607122134,Synthetic second transfer",
-        f"2026-07-13 09:12,9500.00,INR,{UPI},{SURESH_PHONE},{ACCOUNT},SYNBEN202607130912,Synthetic onward transfer",
+        f"2026-07-13 09:12,9500.00,INR,{UPI},{YASH_PHONE},{ACCOUNT},SYNBEN202607130912,Synthetic onward transfer",
     ]
     target.write_text("\n".join(rows) + "\n", encoding="utf-8")
     return target
@@ -331,7 +331,7 @@ Observation post: Linking Road, Bandra West
 Date: 12/07/2026
 
 19:40 hrs - Vehicle {PLATE_A} observed parked at Linking Road. Driver remained in the vehicle.
-20:05 hrs - A person identifying himself as {SURESH_LOOKALIKE} was seen speaking to the driver.
+20:05 hrs - A person identifying himself as {YASH_LOOKALIKE} was seen speaking to the driver.
             This is not the accused named in FIR 0142/2026 and is recorded separately.
 20:48 hrs - {MOHAN}, contact {MOHAN_PHONE}, was observed entering vehicle {PLATE_A}.
 21:30 hrs - Vehicle {PLATE_A} left Linking Road towards Andheri East.

@@ -78,12 +78,12 @@ def test_a_place_name_that_is_not_followed_by_a_label_is_kept_whole() -> None:
 
 def test_a_name_introduced_rather_than_labelled_is_read() -> None:
     """A surveillance note writes no headers. It writes the way an officer speaks."""
-    assert patterns.find_person_names("A person identifying himself as Suresh Yadava was seen.") == ["Suresh Yadava"]
+    assert patterns.find_person_names("A person identifying himself as Yash Kumar Gupt was seen.") == ["Yash Kumar Gupt"]
     assert patterns.find_person_names("who gave his name as Mohan Lal") == ["Mohan Lal"]
 
 
 def test_a_capitalised_word_after_an_ordinary_one_is_still_not_a_name() -> None:
-    """The legal idiom "one Suresh Yadava" reduces to "one" plus a capital, and read "one Rule"."""
+    """The legal idiom "one Yash Kumar Gupt" reduces to "one" plus a capital, and read "one Rule"."""
     assert patterns.find_person_names("This is one Rule that should not match.") == []
 
 

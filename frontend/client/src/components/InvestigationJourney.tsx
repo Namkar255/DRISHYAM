@@ -127,7 +127,7 @@ function EvidenceScene({ stage }: { stage: number }) {
             <Fingerprint size={24} className="text-[#7f1d1d]" />
             <span className="mono text-[7px] font-bold text-[#7f1d1d]">SOURCE</span>
           </div>
-          {[["+91 98765…", "page 1"], ["MH12DE1433", "row 14"], ["Linking Road", "line 6"], ["Suresh Yadav", "page 2"]].map(([value, place], index) =>
+          {[["+91 98765…", "page 1"], ["MH12DE1433", "row 14"], ["Linking Road", "line 6"], ["Yash Kumar Gupta", "page 2"]].map(([value, place], index) =>
             <motion.span
               key={value}
               initial={{ opacity: 0, x: 0, y: 0 }}
@@ -158,7 +158,7 @@ function EvidenceScene({ stage }: { stage: number }) {
             <span className="mono text-[9px] font-bold tracking-[.08em]">ONE IDENTITY</span>
             <span className="mono text-[8px] opacity-80">9876543210</span>
           </motion.div>
-          <p className="mt-1 max-w-[170px] text-center text-[8px] leading-4 text-[#8a7d71]">Suresh Yadav and Suresh Yadava stay two.</p>
+          <p className="mt-1 max-w-[170px] text-center text-[8px] leading-4 text-[#8a7d71]">Yash Kumar Gupta and Yash Kumar Gupt stay two.</p>
         </div>
       </Stage>}
 
@@ -202,7 +202,7 @@ function EvidenceScene({ stage }: { stage: number }) {
             </motion.span>
             <span className="mono text-[8px] font-bold tracking-[.08em] text-[#8a2722]">SUDDEN SILENCE</span>
           </div>
-          {[["19:47", "Suresh called Ravi"], ["20:14", "Suresh called Ravi"], ["—", "then 14 hours with nothing recorded"]].map(([time, text], index) =>
+          {[["19:47", "Yash called Ravi"], ["20:14", "Yash called Ravi"], ["—", "then 14 hours with nothing recorded"]].map(([time, text], index) =>
             <motion.div key={text} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .45, delay: index * .16 }} className={card}>
               <p className="mono text-[8px] text-[#7f1d1d]">{time}</p>
               <p className="mt-0.5 text-[9px] leading-4 text-[#3c332b]">{text}</p>

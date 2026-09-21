@@ -685,7 +685,7 @@ def _report_enrichment(extraction: RawExtraction, *, evidence_id: str) -> None:
     the first unit as attributes of the document, not as claims about anyone.
 
     The role links are read one sentence at a time, and only where the sentence carries the verb.
-    "Suresh Yadav was driving MH12DE1433" states that he used it; the same two strings appearing in
+    "Yash Kumar Gupta was driving MH12DE1433" states that he used it; the same two strings appearing in
     different sentences on the same page state nothing, and turning that into a relationship is the
     invention this pipeline exists to refuse.
     """

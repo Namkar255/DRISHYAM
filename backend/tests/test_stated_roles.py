@@ -7,7 +7,7 @@ about a name on a page was the one piece of information extraction threw away.
 The distinctions below are the whole value of the feature. A form with a "Name:" field has not
 assigned anybody a role. "S/o Mohan Lal" names a parent for identification, not a party to the
 case. And a name somebody gave for themselves is weaker than a role a report assigns, which is
-exactly the difference between the two Sureshes in the benchmark case.
+exactly the difference between the two Yashes in the benchmark case.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from scripts import benchmark_case
     ("text", "name", "role"),
     [
         ("Complainant: Priya Sharma", "Priya Sharma", "complainant"),
-        ("Accused (1): Suresh Yadav, contact +919876543210", "Suresh Yadav", "accused"),
+        ("Accused (1): Yash Kumar Gupta, contact +919876543210", "Yash Kumar Gupta", "accused"),
         ("Driver: Mohan Lal", "Mohan Lal", "driver"),
         ("Witness: Ramesh Chandra", "Ramesh Chandra", "witness"),
         ("Informant: Anita Rao", "Anita Rao", "complainant"),
@@ -42,13 +42,13 @@ def test_a_report_header_states_the_role(text: str, name: str, role: str) -> Non
 @pytest.mark.parametrize(
     ("text", "name", "role"),
     [
-        ("The complainant states that accused Suresh Yadav called her.", "Suresh Yadav", "accused"),
+        ("The complainant states that accused Yash Kumar Gupta called her.", "Yash Kumar Gupta", "accused"),
         ("Later that evening witness Ramesh Chandra saw the vehicle.", "Ramesh Chandra", "witness"),
         ("The driver Mohan Lal remained in the vehicle.", "Mohan Lal", "driver"),
     ],
 )
 def test_the_narrative_states_the_role_too(text: str, name: str, role: str) -> None:
-    """A header writes "Accused:"; the body writes "accused Suresh Yadav was driving"."""
+    """A header writes "Accused:"; the body writes "accused Yash Kumar Gupta was driving"."""
     assert patterns.find_person_roles(text)[name] == role
 
 
@@ -68,14 +68,14 @@ def test_a_parent_named_for_identification_is_not_a_party() -> None:
 
 
 def test_a_name_somebody_gave_for_themselves_is_labelled_as_such() -> None:
-    roles = patterns.find_person_roles("A person identifying himself as Suresh Yadava was seen speaking to the driver.")
-    assert roles == {"Suresh Yadava": "self-identified"}
+    roles = patterns.find_person_roles("A person identifying himself as Yash Kumar Gupt was seen speaking to the driver.")
+    assert roles == {"Yash Kumar Gupt": "self-identified"}
 
 
 def test_an_assigned_role_outranks_a_self_given_name() -> None:
     """Where one passage gives two readings of the same name, the stronger one is kept."""
-    text = "A person identifying himself as Suresh Yadav was seen. Accused: Suresh Yadav"
-    assert patterns.find_person_roles(text)["Suresh Yadav"] == "accused"
+    text = "A person identifying himself as Yash Kumar Gupta was seen. Accused: Yash Kumar Gupta"
+    assert patterns.find_person_roles(text)["Yash Kumar Gupta"] == "accused"
 
 
 def test_text_with_no_stated_role_yields_none() -> None:
@@ -87,11 +87,11 @@ def test_a_name_does_not_run_past_the_end_of_its_sentence() -> None:
     glue the next word on: "Complainant: Priya Sharma. Accused (1): ..." was read as one person
     called "Priya Sharma. Accused" — and the over-long match swallowed the label, so the accused
     was never found at all."""
-    text = "Complainant: Priya Sharma. Accused (1): Suresh Yadav. Driver: Mohan Lal."
-    assert patterns.find_person_names(text) == ["Mohan Lal", "Priya Sharma", "Suresh Yadav"]
+    text = "Complainant: Priya Sharma. Accused (1): Yash Kumar Gupta. Driver: Mohan Lal."
+    assert patterns.find_person_names(text) == ["Mohan Lal", "Priya Sharma", "Yash Kumar Gupta"]
     assert patterns.find_person_roles(text) == {
         "Priya Sharma": "complainant",
-        "Suresh Yadav": "accused",
+        "Yash Kumar Gupta": "accused",
         "Mohan Lal": "driver",
     }
 
@@ -135,9 +135,9 @@ def test_the_role_reaches_the_occurrence_it_was_read_from(roled_case) -> None:
     case, _ = roled_case
     roles = _roles(case["id"])
 
-    assert roles.get("Suresh Yadav") == {"accused"}
+    assert roles.get("Yash Kumar Gupta") == {"accused"}
     assert roles.get("Priya Sharma") == {"complainant"}
-    assert roles.get("Suresh Yadava") == {"self-identified"}, "the weaker basis must stay distinguishable"
+    assert roles.get("Yash Kumar Gupt") == {"self-identified"}, "the weaker basis must stay distinguishable"
 
 
 def test_only_a_person_carries_a_role(roled_case) -> None:

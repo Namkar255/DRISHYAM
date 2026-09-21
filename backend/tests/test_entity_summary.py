@@ -56,7 +56,7 @@ def _summary(case_id: str, label: str):
 
 def test_the_role_a_source_states_is_the_first_thing_said(summarised_case) -> None:
     case, _ = summarised_case
-    summary = _summary(case["id"], "Suresh Yadav")
+    summary = _summary(case["id"], "Yash Kumar Gupta")
 
     assert summary.roles == ["accused"]
     first = summary.sentences[0]
@@ -67,7 +67,7 @@ def test_the_role_a_source_states_is_the_first_thing_said(summarised_case) -> No
 def test_a_weaker_basis_is_worded_as_the_weaker_thing_it_is(summarised_case) -> None:
     """"Identifying himself as" is not a report assigning a role, and must not read like one."""
     case, _ = summarised_case
-    summary = _summary(case["id"], "Suresh Yadava")
+    summary = _summary(case["id"], "Yash Kumar Gupt")
 
     assert summary.roles == ["self-identified"]
     assert "gave this name for themselves" in summary.sentences[0].text
@@ -86,7 +86,7 @@ def test_it_says_how_many_files_carry_the_identity(summarised_case) -> None:
 def test_an_identity_connected_to_nothing_says_so(summarised_case) -> None:
     """A short card reads as “nothing to see”. It has to read as “nothing was recorded”."""
     case, _ = summarised_case
-    summary = _summary(case["id"], "Suresh Yadava")
+    summary = _summary(case["id"], "Yash Kumar Gupt")
 
     assert summary.relation_count == 0
     text = " ".join(sentence.text for sentence in summary.sentences)
@@ -144,7 +144,7 @@ def test_it_never_claims_an_absence_that_contradicts_its_own_sentences(summarise
 
 def test_every_sentence_that_states_a_source_names_it(summarised_case) -> None:
     case, _ = summarised_case
-    for label in ("Suresh Yadav", "MH12DE1433", "+919876543210"):
+    for label in ("Yash Kumar Gupta", "MH12DE1433", "+919876543210"):
         for sentence in _summary(case["id"], label).sentences:
             if sentence.basis in {"stated role", "relationship"} and sentence.evidence is None:
                 assert "Connected to" in sentence.text, f"a sourced claim with no source: {sentence.text}"
@@ -168,7 +168,7 @@ def test_no_sentence_asserts_guilt_or_identity(summarised_case) -> None:
 
 def test_the_caveat_travels_with_every_summary(summarised_case) -> None:
     case, _ = summarised_case
-    assert _summary(case["id"], "Suresh Yadav").caveat == entity_summary.STANDING_CAVEAT
+    assert _summary(case["id"], "Yash Kumar Gupta").caveat == entity_summary.STANDING_CAVEAT
 
 
 # --------------------------------------------------------------------------- through the API
@@ -176,31 +176,31 @@ def test_the_caveat_travels_with_every_summary(summarised_case) -> None:
 
 def test_the_endpoint_returns_the_summary(client, summarised_case) -> None:
     case, headers = summarised_case
-    entity = _entity(case["id"], "Suresh Yadav")
+    entity = _entity(case["id"], "Yash Kumar Gupta")
     response = client.get(f"/api/v1/cases/{case['id']}/grounded/entities/{entity.id}/summary", headers=headers)
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["label"] == "Suresh Yadav"
+    assert body["label"] == "Yash Kumar Gupta"
     assert body["roles"] == ["accused"]
     assert body["sentences"] and body["caveat"]
 
 
 def test_another_users_case_is_refused(client, summarised_case, account) -> None:
     case, _ = summarised_case
-    entity = _entity(case["id"], "Suresh Yadav")
+    entity = _entity(case["id"], "Yash Kumar Gupta")
     _, outsider = account()
     response = client.get(
         f"/api/v1/cases/{case['id']}/grounded/entities/{entity.id}/summary", headers=outsider
     )
     assert response.status_code in {403, 404}
-    assert "Suresh" not in response.text
+    assert "Yash" not in response.text
 
 
 def test_an_entity_from_another_case_is_not_summarised(client, summarised_case, case_factory) -> None:
     """Scoping is by case, so an entity id from elsewhere must not resolve here."""
     case, headers = summarised_case
     other, _ = case_factory(headers)
-    entity = _entity(case["id"], "Suresh Yadav")
+    entity = _entity(case["id"], "Yash Kumar Gupta")
     response = client.get(f"/api/v1/cases/{other['id']}/grounded/entities/{entity.id}/summary", headers=headers)
     assert response.status_code == 404

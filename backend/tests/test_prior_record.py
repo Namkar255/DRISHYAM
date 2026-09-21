@@ -19,7 +19,7 @@ from app.core.db import SessionLocal
 from app.models.entities import Entity, PriorRecord
 from scripts import benchmark_case, seed_prior_records
 
-SURESH_PHONE = "+919876543210"
+YASH_PHONE = "+919876543210"
 
 
 @pytest.fixture
@@ -62,7 +62,7 @@ def _lookup(client, case, headers, value: str) -> dict:
 
 def test_a_registered_case_is_reported_with_where_and_when(client, recorded_case) -> None:
     case, headers = recorded_case
-    body = _lookup(client, case, headers, SURESH_PHONE)
+    body = _lookup(client, case, headers, YASH_PHONE)
 
     assert body["entries"], "the seeded dataset names this number"
     for entry in body["entries"]:
@@ -75,7 +75,7 @@ def test_a_registered_case_is_reported_with_where_and_when(client, recorded_case
 def test_every_disposal_is_shown_not_only_the_convictions(client, recorded_case) -> None:
     """A store that surfaced convictions and dropped acquittals would be a lie told by arithmetic."""
     case, headers = recorded_case
-    body = _lookup(client, case, headers, SURESH_PHONE)
+    body = _lookup(client, case, headers, YASH_PHONE)
 
     disposals = {entry["disposal"] for entry in body["entries"]}
     assert "acquitted" in disposals, "the seeded record includes an acquittal and it must be returned"
@@ -99,7 +99,7 @@ def test_the_dataset_is_not_a_wall_of_convictions() -> None:
 def test_nothing_is_scored_or_ranked(client, recorded_case) -> None:
     """Four registered cases is four registered cases. It is not a number about the person."""
     case, headers = recorded_case
-    rendered = str(_lookup(client, case, headers, SURESH_PHONE)).lower()
+    rendered = str(_lookup(client, case, headers, YASH_PHONE)).lower()
 
     for forbidden in ("risk", "score", "likelihood", "propensity", "habitual", "repeat offender"):
         assert forbidden not in rendered, f"the lookup states {forbidden!r}"
@@ -107,7 +107,7 @@ def test_nothing_is_scored_or_ranked(client, recorded_case) -> None:
 
 def test_the_caveat_travels_with_every_answer(client, recorded_case) -> None:
     case, headers = recorded_case
-    for value in (SURESH_PHONE, "Suresh Yadava"):
+    for value in (YASH_PHONE, "Yash Kumar Gupt"):
         body = _lookup(client, case, headers, value)
         assert "not evidence in this case" in body["caveat"]
         assert "section 46" in body["caveat"].lower()
@@ -119,7 +119,7 @@ def test_the_caveat_travels_with_every_answer(client, recorded_case) -> None:
 def test_an_identity_with_no_record_says_so_carefully(client, recorded_case) -> None:
     """Absence from this dataset is not absence of a record, and the wording keeps them apart."""
     case, headers = recorded_case
-    body = _lookup(client, case, headers, "Suresh Yadava")
+    body = _lookup(client, case, headers, "Yash Kumar Gupt")
 
     assert body["entries"] == []
     assert "statement about this record, not about the person" in body["statement"]
@@ -128,14 +128,14 @@ def test_an_identity_with_no_record_says_so_carefully(client, recorded_case) -> 
 def test_matching_is_on_the_canonical_value(client, recorded_case) -> None:
     """A number written four ways is one identity; a near-miss attaches somebody else's history."""
     case, headers = recorded_case
-    body = _lookup(client, case, headers, SURESH_PHONE)
+    body = _lookup(client, case, headers, YASH_PHONE)
     assert body["matched_on"] == "9876543210"
 
 
 def test_the_lookup_is_recorded_whatever_it_returns(client, recorded_case) -> None:
     """An officer who ran the check has learned something the case did not contain."""
     case, headers = recorded_case
-    _lookup(client, case, headers, "Suresh Yadava")
+    _lookup(client, case, headers, "Yash Kumar Gupt")
 
     entries = client.get(f"/api/v1/cases/{case['id']}/audit", headers=headers).json()
     assert "prior_record.lookup" in [item["action"] for item in entries]
@@ -143,7 +143,7 @@ def test_the_lookup_is_recorded_whatever_it_returns(client, recorded_case) -> No
 
 def test_an_outsider_cannot_run_the_check(client, recorded_case, account) -> None:
     case, headers = recorded_case
-    entity_id = _entity_id(case["id"], SURESH_PHONE)
+    entity_id = _entity_id(case["id"], YASH_PHONE)
     _, outsider = account()
     response = client.get(
         f"/api/v1/cases/{case['id']}/grounded/entities/{entity_id}/prior-record", headers=outsider
@@ -154,7 +154,7 @@ def test_an_outsider_cannot_run_the_check(client, recorded_case, account) -> Non
 def test_an_entity_from_another_case_is_refused(client, recorded_case, case_factory) -> None:
     case, headers = recorded_case
     other, _ = case_factory(headers)
-    entity_id = _entity_id(case["id"], SURESH_PHONE)
+    entity_id = _entity_id(case["id"], YASH_PHONE)
     response = client.get(
         f"/api/v1/cases/{other['id']}/grounded/entities/{entity_id}/prior-record", headers=headers
     )
@@ -165,12 +165,12 @@ def test_the_record_is_separate_from_the_shared_ledger(client, recorded_case) ->
     """Two sources answering two questions. Folding them together would make the ledger disclose
     what it is built not to hold."""
     case, headers = recorded_case
-    entity_id = _entity_id(case["id"], SURESH_PHONE)
+    entity_id = _entity_id(case["id"], YASH_PHONE)
 
     elsewhere = client.get(
         f"/api/v1/cases/{case['id']}/grounded/entities/{entity_id}/elsewhere", headers=headers
     ).json()
-    prior = _lookup(client, case, headers, SURESH_PHONE)
+    prior = _lookup(client, case, headers, YASH_PHONE)
 
     # The ledger reply carries no case detail at all; the record reply carries no live-case reference.
     assert "entries" not in elsewhere

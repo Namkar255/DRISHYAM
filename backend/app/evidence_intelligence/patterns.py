@@ -512,12 +512,12 @@ PERSON_LABEL_PATTERN = re.compile(
 PERSON_RELATION_PATTERN = re.compile(
     r"\b[SDWsdw]\s?/\s?[Oo]\.?\s*(?P<name>[A-Z][A-Za-z.]{1,20}(?:(?<![A-Za-z]{2}\.)\s+[A-Z][A-Za-z.]{1,20}){0,3})"
 )
-# A report header writes "Accused: Suresh Yadav"; the narrative below it writes "accused Suresh
+# A report header writes "Accused: Yash Kumar Gupta"; the narrative below it writes "accused Yash
 # Yadav was driving". The role is stated either way, and reading only the header form meant every
 # name in the body of an FIR was invisible. The name must still be capitalised, so "the accused was
 # seen" ends at "was" and yields nothing.
 # The role word may be capitalised or not; the name may not. re.IGNORECASE cannot express that --
-# it would also relax [A-Z] on the name and let "states that accused Suresh" through as a person,
+# it would also relax [A-Z] on the name and let "states that accused Yash" through as a person,
 # which is exactly what it did. The role alternatives therefore carry their own case classes.
 PERSON_INLINE_ROLE_PATTERN = re.compile(
     r"\b(?P<role>[Aa]ccused|[Cc]omplainant|[Vv]ictim|[Ii]nformant|[Ww]itness|[Ss]uspect|[Dd]eceased"
@@ -527,13 +527,13 @@ PERSON_INLINE_ROLE_PATTERN = re.compile(
 
 
 # A surveillance note or a statement rarely writes a label. It writes the way an officer speaks:
-# "a person identifying himself as Suresh Yadava", "one Mohan Lal was seen", "who gave his name as
+# "a person identifying himself as Yash Kumar Gupt", "one Mohan Lal was seen", "who gave his name as
 # Ravi Kumar". The role is stated as plainly as any header does it, and reading only the labelled
 # and inline-role forms left every name in a surveillance note invisible -- which is the one source
 # type SIH26189 names that has no header at all.
 #
 # The introducing phrase is what supplies the role here, so the name still never comes from
-# capitalisation alone. The bare legal idiom "one Suresh Yadava" is deliberately not among them:
+# capitalisation alone. The bare legal idiom "one Yash Kumar Gupt" is deliberately not among them:
 # it reduces to "one" plus a capitalised word, and read "This is one Rule" as a person.
 PERSON_INTRODUCTION_PATTERN = re.compile(
     r"\b(?:identif(?:ying|ied)\s+(?:himself|herself|themselves)\s+as"
@@ -551,7 +551,7 @@ def normalize_person(value: str) -> str:
 # verbatim in the provenance quote; this is the reading of it, and it is the first thing any
 # investigator asks about a name on a page.
 #
-# `named` and `relative` are deliberately not case roles. "Name: Suresh Yadav" says only that the
+# `named` and `relative` are deliberately not case roles. "Name: Yash Kumar Gupta" says only that the
 # form has a name field, and "S/o Mohan Lal" names a parent for identification -- reporting either
 # as "accused" would be the system inventing a role the source never stated.
 ROLE_READINGS: dict[str, str] = {
@@ -597,10 +597,10 @@ def _name_before_the_full_stop(raw: str) -> str:
     """Stop a name where its sentence ends.
 
     The patterns refuse to cross the boundary themselves -- trimming afterwards was not enough,
-    because the over-long match had already consumed the next role label and "Accused (1): Suresh
+    because the over-long match had already consumed the next role label and "Accused (1): Yash
     Yadav" was never seen at all. This remains as the tidy-up for a trailing period.
 
-    A dot is allowed inside a name so initials survive -- "R. Kumar", "Suresh K." -- but the same
+    A dot is allowed inside a name so initials survive -- "R. Kumar", "Yash K." -- but the same
     dot lets a sentence-ending period glue the next capitalised word on: "Complainant: Priya
     Sharma. Accused (1): ..." was read as one person called "Priya Sharma. Accused". An initial is
     one or two characters; anything longer ending in a period is the end of a sentence.

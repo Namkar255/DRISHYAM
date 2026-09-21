@@ -41,7 +41,7 @@ function ScreenshotFrame() {
         <Mark>+919876543210</Mark>
       </p>
       <p className="mt-3">12/07/2026 20:40</p>
-      <p>Suresh here. Reporting for the</p>
+      <p>Yash here. Reporting for the</p>
       <p>Andheri East work.</p>
       <p className="mt-3">12/07/2026 20:52</p>
       <p>Send the fee before you travel.</p>
@@ -90,7 +90,7 @@ function FirFrame() {
       <p>District: Mumbai Suburban</p>
       <p className="mt-2">Complainant: Protected person A</p>
       <p>
-        <Mark>Accused (1): Suresh Yadav, +919876543210</Mark>
+        <Mark>Accused (1): Yash Kumar Gupta, +919876543210</Mark>
       </p>
       <p>Accused (2): Ravi Kumar, +919988776655</p>
     </div>

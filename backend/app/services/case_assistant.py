@@ -186,8 +186,8 @@ def _labels_in(question: str, entities: Sequence[Entity]) -> list[Entity]:
 def _best_match(folded: str, entities: Sequence[Entity]) -> Entity | None:
     """The entity a question term names, preferring the one that matches it exactly.
 
-    Matching by substring alone answered a question about "Suresh Yadav" with the record for
-    "Suresh Yadava" -- a different person, named in a different source, whom the graph had
+    Matching by substring alone answered a question about "Yash Kumar Gupta" with the record for
+    "Yash Kumar Gupt" -- a different person, named in a different source, whom the graph had
     correctly kept apart. Keeping two people separate in storage is worth nothing if a question
     about one returns the other, so the same distinction has to hold at lookup.
 
@@ -208,8 +208,8 @@ def _best_match(folded: str, entities: Sequence[Entity]) -> Entity | None:
     ]
     if not partial:
         return None
-    # Among partial readings the shortest label is the closest: "Suresh Yadav" inside both
-    # "Suresh Yadav" and "Suresh Yadava" belongs to the shorter of the two.
+    # Among partial readings the shortest label is the closest: "Yash Kumar Gupta" inside both
+    # "Yash Kumar Gupta" and "Yash Kumar Gupt" belongs to the shorter of the two.
     return min(partial, key=lambda entity: (len(entity.value or ""), entity.value or ""))
 
 
