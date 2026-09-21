@@ -7,7 +7,6 @@ import { useLocation } from "wouter";
 import InvestigationJourney from "@/components/InvestigationJourney";
 import EvidenceReconstruction from "@/components/EvidenceReconstruction";
 import CapabilityToolkit from "@/components/CapabilityToolkit";
-import TransactionTrail from "@/components/TransactionTrail";
 import { useSession } from "@/contexts/SessionContext";
 import PublicCasePreview from "@/components/PublicCasePreview";
 import NetworkPreview from "@/components/NetworkPreview";
@@ -185,7 +184,6 @@ export default function Home() {
           <PublicCasePreview />
         </section>
 
-        <TransactionTrail />
 
         <InvestigationJourney />
 

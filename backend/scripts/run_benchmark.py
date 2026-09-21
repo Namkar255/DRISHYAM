@@ -44,6 +44,7 @@ from sqlalchemy import select  # noqa: E402
 from app.core.db import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.entities import (  # noqa: E402
+    Alert,
     Entity,
     EntityOccurrence,
     EntityRelation,
@@ -63,17 +64,68 @@ GROUND_TRUTH = benchmark_case.GROUND_TRUTH
 
 @dataclass
 class Measurement:
+    """One component measured two ways, because one way is not enough to judge it by.
+
+    **Recall** is how much of what is declared was found. A system can reach 1.0 by extracting
+    everything it sees, which is why it must never be published alone.
+
+    **Precision** is how much of what was found is real. It is the number that catches a phantom
+    entity -- a digit misread out of a blurred image, a handle truncated halfway -- and it is the
+    one an investigator actually depends on, because a wrong identity in a case file costs more
+    than a missing one.
+
+    `returned` is how many the system produced of this kind. It is None where the ground truth does
+    not list the type completely, and precision is then reported as unmeasurable rather than
+    guessed: scoring a correctly extracted entity nobody annotated as an error would be a worse
+    lie than reporting no number at all.
+    """
+
     name: str
     found: int
     expected: int
+    returned: int | None = None
     detail: list[str] = field(default_factory=list)
 
     @property
     def recall(self) -> float:
         return (self.found / self.expected) if self.expected else 1.0
 
+    @property
+    def precision(self) -> float | None:
+        if self.returned is None:
+            return None
+        return (self.found / self.returned) if self.returned else 1.0
+
+    @property
+    def f1(self) -> float | None:
+        """The harmonic mean, which a system cannot raise by sacrificing one side for the other."""
+        precision = self.precision
+        if precision is None:
+            return None
+        if precision + self.recall == 0:
+            return 0.0
+        return 2 * precision * self.recall / (precision + self.recall)
+
     def to_dict(self) -> dict:
-        return {"name": self.name, "found": self.found, "expected": self.expected, "recall": round(self.recall, 4), "detail": self.detail}
+        body = {
+            "name": self.name,
+            "found": self.found,
+            "expected": self.expected,
+            "recall": round(self.recall, 4),
+            "detail": self.detail,
+        }
+        if self.returned is None:
+            body["precision"] = None
+            body["f1"] = None
+            body["precision_note"] = (
+                "Not measurable: this benchmark does not list every instance of this type, so an "
+                "extraction it did not annotate cannot be told apart from a mistake."
+            )
+        else:
+            body["returned"] = self.returned
+            body["precision"] = round(self.precision, 4)
+            body["f1"] = round(self.f1, 4)
+        return body
 
 
 @dataclass
@@ -142,6 +194,16 @@ def ingest(client: TestClient, headers: dict[str, str]) -> tuple[str, dict[str, 
     case.raise_for_status()
     case_id = case.json()["id"]
 
+    # Declare the incident window. Without one, every rule that places contact relative to the
+    # incident has nothing to place it against and stays silent -- which the harness would then
+    # report as a detection failure rather than as the missing input it actually is.
+    opens, closes = benchmark_case.INCIDENT_WINDOW
+    client.patch(
+        f"/api/v1/cases/{case_id}/incident-window",
+        headers=headers,
+        json={"date_range_start": opens, "date_range_end": closes},
+    ).raise_for_status()
+
     artifacts = benchmark_case.generate()
     outcomes: dict[str, dict] = {}
     for name, path in artifacts.items():
@@ -188,10 +250,19 @@ def measure_entities(db, case_id: str) -> tuple[list[Measurement], dict[str, Ent
     found = _entities(db, case_id)
     index = {(item.entity_type, item.normalized_value.casefold()): item for item in found}
 
+    # What the system produced, per type, so precision has a denominator. Counted over distinct
+    # canonical values: the same identity resolved from four files is one entity, and counting it
+    # four times would make the figure describe the evidence rather than the extraction.
+    returned_by_type: dict[str, set[str]] = {}
+    for item in found:
+        returned_by_type.setdefault(item.entity_type, set()).add((item.normalized_value or "").casefold())
+
+    declared = {(item.entity_type, item.normalized_value.casefold()) for item in GROUND_TRUTH.entities}
+
     by_class: dict[str, Measurement] = {}
     resolved: dict[str, Entity] = {}
     for expected in GROUND_TRUTH.entities:
-        measurement = by_class.setdefault(expected.entity_type, Measurement(f"entity recall — {expected.entity_type}", 0, 0))
+        measurement = by_class.setdefault(expected.entity_type, Measurement(f"entity — {expected.entity_type}", 0, 0))
         measurement.expected += 1
         hit = index.get((expected.entity_type, expected.normalized_value.casefold()))
         if hit is not None:
@@ -202,6 +273,18 @@ def measure_entities(db, case_id: str) -> tuple[list[Measurement], dict[str, Ent
             resolved[expected.label] = hit
         else:
             measurement.detail.append(f"not found: {expected.label}")
+
+    for entity_type, measurement in by_class.items():
+        if entity_type not in GROUND_TRUTH.exhaustive_types:
+            continue
+        produced = returned_by_type.get(entity_type, set())
+        measurement.returned = len(produced)
+        # Name every extra. A precision figure with nothing behind it cannot be acted on, and each
+        # of these is either a defect to fix or a gap in the ground truth to close.
+        for value in sorted(produced):
+            if (entity_type, value) not in declared:
+                measurement.detail.append(f"found but not declared: {value}")
+
     return list(by_class.values()), resolved
 
 
@@ -403,6 +486,31 @@ def provider_timing(db, case_id: str) -> dict:
 # --------------------------------------------------------------------------- reporting
 
 
+def measure_planted_patterns(db, case_id: str) -> Measurement:
+    """Whether the rules found the patterns deliberately planted in this evidence.
+
+    Measuring extraction is not measuring detection. A benchmark that counted only entities would
+    give full marks to a case whose rules never fired once, so the patterns the evidence was built
+    to contain are declared in the ground truth and checked for here.
+
+    Precision is left unmeasured on purpose. A rule firing on something nobody planted is not
+    thereby wrong -- synthetic evidence has shapes its authors did not intend, and scoring those as
+    false positives would push the rules toward finding less than is there.
+    """
+    raised = {
+        row.rule_code
+        for row in db.scalars(select(Alert).where(Alert.case_id == case_id))
+    }
+    measurement = Measurement("planted patterns detected", 0, 0)
+    for rule_code, description in GROUND_TRUTH.planted_patterns:
+        measurement.expected += 1
+        if rule_code in raised:
+            measurement.found += 1
+        else:
+            measurement.detail.append(f"not raised: {rule_code} — {description}")
+    return measurement
+
+
 def render(report: dict) -> str:
     lines = [
         "",
@@ -412,12 +520,26 @@ def render(report: dict) -> str:
         "=" * 78,
         "",
         "MEASURED (reported, not graded)",
+        f"  {'component':<40} {'recall':>8} {'precis.':>8} {'F1':>7}   found/declared",
+        "  " + "-" * 74,
     ]
     for item in report["measurements"]:
-        bar = "#" * int(round(item["recall"] * 24))
-        lines.append(f"  {item['name']:<44} {item['found']:>3}/{item['expected']:<3} {item['recall']*100:5.1f}%  {bar}")
-        for note in item["detail"][:4]:
+        precision = "     n/a" if item.get("precision") is None else f"{item['precision']*100:7.1f}%"
+        f1 = "    n/a" if item.get("f1") is None else f"{item['f1']*100:6.1f}%"
+        lines.append(
+            f"  {item['name']:<40} {item['recall']*100:7.1f}% {precision} {f1}   {item['found']}/{item['expected']}"
+            + (f" of {item['returned']} returned" if item.get("returned") is not None else "")
+        )
+        for note in item["detail"][:5]:
             lines.append(f"      - {note}")
+    lines += [
+        "",
+        "  Recall is how much of what this benchmark declares was found. Precision is how much of",
+        "  what was found is declared -- it is the figure that catches an entity the system invented,",
+        "  and it is reported only for the types this benchmark lists completely. Where it reads n/a,",
+        "  the ground truth is partial and any precision figure would punish correct extractions it",
+        "  simply never annotated.",
+    ]
 
     lines += ["", "RESTRAINT (pass or fail)"]
     marker = {"pass": "PASS", "fail": "FAIL", "not_verified": " -- "}
@@ -468,6 +590,7 @@ def main() -> int:
                 measure_relations(db, case_id, resolved),
                 measure_image_only_identifiers(db, case_id, outcomes),
                 measure_traceability(db, case_id),
+                measure_planted_patterns(db, case_id),
             ]
             checks = [
                 check_no_fabricated_number(db, case_id),

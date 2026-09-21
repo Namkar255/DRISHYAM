@@ -10,11 +10,12 @@
  * right of a card at full weight the way the overview metrics use it.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, Check, FileSearch, Loader2, Network, RefreshCw, Route, ShieldCheck, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, Download, FileSearch, Link2, Loader2, Network, RefreshCw, Route, Search, ShieldCheck, Users, X } from "lucide-react";
 import { getApiErrorMessage } from "@/api/client";
 import EvidenceSourceViewer from "@/components/EvidenceSourceViewer";
 import { CONFIDENCE_TONES, confidenceTitle, readConfidence } from "@/lib/confidence";
 import { targetFromReference } from "@/api/sourceView";
+import { getGraph, type GraphRecord } from "@/api/analysis";
 import {
   getEntityRelationSummary, getEntityRelations, getImportantEntities, getNetworkBridges, getNetworkCommunities, getNetworkOverview, getNetworkPath, getNetworkSubgraph, reviewEntityRelation,
   type ImportanceMetric,
@@ -91,28 +92,259 @@ function ImportanceCard({ record, onOpen, onOpenSource }) {
   </div>;
 }
 
-function NetworkCanvas({ nodes, edges, selected, onSelect, height = 520 }) {
-  // Rings sized to the frame rather than to a fixed radius, so labels do not collide in the middle
-  // while the sides stay empty.
-  const positions = useMemo(() => {
-    const result = new Map();
-    const total = nodes.length;
-    if (!total) return result;
-    if (total === 1) { result.set(nodes[0].id, { x: 450, y: 262 }); return result; }
-    const firstRing = Math.min(total, 9);
-    const rings = [{ from: 0, to: firstRing, radius: total <= 4 ? 130 : 196 }];
-    if (total > firstRing) rings.push({ from: firstRing, to: total, radius: 112 });
-    rings.forEach(({ from, to, radius }, ringIndex) => {
-      const size = to - from;
-      for (let index = from; index < to; index += 1) {
-        const angle = ((index - from) / size) * Math.PI * 2 - Math.PI / 2 + (ringIndex ? Math.PI / size : 0);
-        result.set(nodes[index].id, { x: 450 + Math.cos(angle) * radius, y: 262 + Math.sin(angle) * radius * 0.82 });
-      }
-    });
-    return result;
-  }, [nodes]);
+/**
+ * The case's relationships, laid out so the shape of the network is visible and every node stays
+ * openable at the evidence it was read from.
+ *
+ * **Layout is force-directed, not decorative.** The old concentric rings placed a node by its index
+ * in an array, so two identities sat next to each other because of load order and nothing else. A
+ * spring layout puts connected identities near one another, which means the clusters a reader sees
+ * are clusters the evidence actually states. It is seeded deterministically, so the same case draws
+ * the same picture every time — an investigator who describes "the group on the left" must find it
+ * there tomorrow.
+ *
+ * **Size is a count, never a judgement.** A node's radius grows with the number of recorded
+ * observations involving that identity. That is a fact about how much the case holds, and it is
+ * labelled as such. Sizing by a "risk" or "importance" score would put a claim about a person into
+ * the picture itself, where no caveat can reach it.
+ *
+ * Dragging pins a node where it is put, because untangling a graph by hand is how somebody reads a
+ * dense one. Everything else — zoom, pan, filter, search — narrows what is drawn without ever
+ * changing what is stated.
+ */
+function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, height = 520 }) {
+  const WIDTH = 900;
+  const HEIGHT = 520;
 
-  const touching = new Set(edges.filter((e) => e.subject_entity_id === selected || e.object_entity_id === selected).flatMap((e) => [e.subject_entity_id, e.object_entity_id]));
+  const [pinned, setPinned] = useState({});
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 });
+  const [types, setTypes] = useState([]);
+  const [query, setQuery] = useState("");
+  const [hovered, setHovered] = useState(null);
+  const drag = useRef(null);
+  const svgRef = useRef(null);
+
+  // A node the reader has not filtered away. Edges follow their endpoints: an edge to a hidden node
+  // is not drawn, because a line into empty space reads as a relationship to nothing.
+  const shown = useMemo(() => {
+    if (!types.length) return nodes;
+    return nodes.filter((node) => types.includes(node.entity_type));
+  }, [nodes, types]);
+  const shownIds = useMemo(() => new Set(shown.map((node) => node.id)), [shown]);
+  const shownEdges = useMemo(
+    () => edges.filter((edge) => shownIds.has(edge.subject_entity_id) && shownIds.has(edge.object_entity_id)),
+    [edges, shownIds],
+  );
+
+  // How much this case records about each identity. Summed observations, not evidence files: an
+  // observation is one record, so it cannot double-count the way a file shared by two edges would.
+  const weight = useMemo(() => {
+    const total = new Map();
+    edges.forEach((edge) => {
+      const count = edge.observations || 1;
+      [edge.subject_entity_id, edge.object_entity_id].forEach((id) => total.set(id, (total.get(id) || 0) + count));
+    });
+    return total;
+  }, [edges]);
+  const heaviest = Math.max(1, ...[...weight.values()]);
+
+  /**
+   * A spring layout: edges pull their endpoints together, every pair pushes apart, and the result
+   * is centred in the frame.
+   *
+   * Seeded from a node's position in a stable sort rather than from randomness, so the picture does
+   * not rearrange itself between renders. A graph that moved every time you looked at it would be
+   * unusable for describing anything to a colleague.
+   */
+  const layout = useMemo(() => {
+    const place = new Map();
+    const list = [...shown].sort((a, b) => a.id.localeCompare(b.id));
+    const total = list.length;
+    if (!total) return place;
+    if (total === 1) { place.set(list[0].id, { x: WIDTH / 2, y: HEIGHT / 2 }); return place; }
+
+    list.forEach((node, index) => {
+      const angle = (index / total) * Math.PI * 2;
+      place.set(node.id, { x: WIDTH / 2 + Math.cos(angle) * 180, y: HEIGHT / 2 + Math.sin(angle) * 150 });
+    });
+
+    const ideal = Math.min(150, Math.max(70, 620 / Math.sqrt(total)));
+    // Every pass compares every pair, so the work grows with the square of the node count. A large
+    // case gets fewer passes rather than a frozen tab: the layout is slightly looser and the page
+    // still responds, which is the right trade when the alternative is neither.
+    const passes = total > 140 ? 45 : total > 70 ? 80 : 140;
+    for (let pass = 0; pass < passes; pass += 1) {
+      const cooling = 1 - pass / passes;
+      const force = new Map(list.map((node) => [node.id, { x: 0, y: 0 }]));
+
+      for (let i = 0; i < total; i += 1) {
+        for (let j = i + 1; j < total; j += 1) {
+          const a = place.get(list[i].id);
+          const b = place.get(list[j].id);
+          let dx = a.x - b.x;
+          let dy = a.y - b.y;
+          let distance = Math.hypot(dx, dy) || 0.01;
+          if (distance < 1) { dx = (i - j) || 1; dy = 1; distance = 1; }
+          const push = (ideal * ideal) / distance / distance;
+          force.get(list[i].id).x += (dx / distance) * push * 14;
+          force.get(list[i].id).y += (dy / distance) * push * 14;
+          force.get(list[j].id).x -= (dx / distance) * push * 14;
+          force.get(list[j].id).y -= (dy / distance) * push * 14;
+        }
+      }
+
+      shownEdges.forEach((edge) => {
+        const a = place.get(edge.subject_entity_id);
+        const b = place.get(edge.object_entity_id);
+        if (!a || !b) return;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const distance = Math.hypot(dx, dy) || 0.01;
+        const pull = (distance - ideal) * 0.045;
+        force.get(edge.subject_entity_id).x += (dx / distance) * pull * distance * 0.1;
+        force.get(edge.subject_entity_id).y += (dy / distance) * pull * distance * 0.1;
+        force.get(edge.object_entity_id).x -= (dx / distance) * pull * distance * 0.1;
+        force.get(edge.object_entity_id).y -= (dy / distance) * pull * distance * 0.1;
+      });
+
+      list.forEach((node) => {
+        const point = place.get(node.id);
+        const push = force.get(node.id);
+        const step = Math.min(22, Math.hypot(push.x, push.y)) * cooling;
+        const magnitude = Math.hypot(push.x, push.y) || 1;
+        place.set(node.id, { x: point.x + (push.x / magnitude) * step, y: point.y + (push.y / magnitude) * step });
+      });
+    }
+
+    // Fit what was computed back into the frame, so a sparse graph is not a dot in the middle and a
+    // dense one does not run off the edge.
+    const xs = list.map((node) => place.get(node.id).x);
+    const ys = list.map((node) => place.get(node.id).y);
+    const minX = Math.min(...xs); const maxX = Math.max(...xs);
+    const minY = Math.min(...ys); const maxY = Math.max(...ys);
+    const scale = Math.min((WIDTH - 150) / Math.max(1, maxX - minX), (HEIGHT - 130) / Math.max(1, maxY - minY), 1.6);
+    list.forEach((node) => {
+      const point = place.get(node.id);
+      place.set(node.id, {
+        x: WIDTH / 2 + (point.x - (minX + maxX) / 2) * scale,
+        y: HEIGHT / 2 + (point.y - (minY + maxY) / 2) * scale,
+      });
+    });
+    return place;
+  }, [shown, shownEdges]);
+
+  const positions = useMemo(() => {
+    const merged = new Map(layout);
+    Object.entries(pinned).forEach(([id, point]) => { if (merged.has(id)) merged.set(id, point); });
+    return merged;
+  }, [layout, pinned]);
+
+  const matches = useMemo(() => {
+    const term = query.trim().toLowerCase();
+    if (!term) return null;
+    return new Set(shown.filter((node) => String(node.label).toLowerCase().includes(term)).map((node) => node.id));
+  }, [query, shown]);
+
+  const touching = useMemo(
+    () => new Set(shownEdges
+      .filter((edge) => edge.subject_entity_id === selected || edge.object_entity_id === selected)
+      .flatMap((edge) => [edge.subject_entity_id, edge.object_entity_id])),
+    [shownEdges, selected],
+  );
+
+  // ---------------------------------------------------------------- pointer handling
+  const toCanvas = (event) => {
+    const box = svgRef.current?.getBoundingClientRect();
+    if (!box) return { x: 0, y: 0 };
+    const scaleX = WIDTH / box.width;
+    const scaleY = HEIGHT / box.height;
+    return {
+      x: ((event.clientX - box.left) * scaleX - view.x) / view.k,
+      y: ((event.clientY - box.top) * scaleY - view.y) / view.k,
+    };
+  };
+
+  const startNodeDrag = (event, id) => {
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const point = positions.get(id);
+    const at = toCanvas(event);
+    drag.current = { kind: "node", id, dx: at.x - point.x, dy: at.y - point.y, moved: false };
+  };
+
+  const startPan = (event) => {
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    drag.current = { kind: "pan", startX: event.clientX, startY: event.clientY, origin: { ...view }, moved: false };
+  };
+
+  const onMove = (event) => {
+    const held = drag.current;
+    if (!held) return;
+    held.moved = true;
+    if (held.kind === "node") {
+      const at = toCanvas(event);
+      setPinned((current) => ({ ...current, [held.id]: { x: at.x - held.dx, y: at.y - held.dy } }));
+      return;
+    }
+    const box = svgRef.current?.getBoundingClientRect();
+    const scale = box ? WIDTH / box.width : 1;
+    setView({
+      ...held.origin,
+      x: held.origin.x + (event.clientX - held.startX) * scale,
+      y: held.origin.y + (event.clientY - held.startY) * scale,
+    });
+  };
+
+  const endDrag = () => { drag.current = null; };
+
+  const onWheel = (event) => {
+    event.preventDefault();
+    const at = toCanvas(event);
+    const next = Math.min(3.5, Math.max(0.35, view.k * (event.deltaY < 0 ? 1.12 : 0.89)));
+    setView({ k: next, x: view.x + at.x * (view.k - next), y: view.y + at.y * (view.k - next) });
+  };
+
+  const reset = () => { setView({ x: 0, y: 0, k: 1 }); setPinned({}); };
+
+  /**
+   * The drawn graph as JSON, for a colleague or another system.
+   *
+   * It carries what is on screen — including the filter that was applied — because an export that
+   * silently differed from the picture somebody was looking at would be the wrong file to argue
+   * from. Every edge keeps its observation and evidence counts so the receiving end can see how
+   * much sits behind each line rather than taking it on trust.
+   */
+  const exportJson = () => {
+    const payload = {
+      exported_at: new Date().toISOString(),
+      note: "Relationships as DRISHYAM read them from this case's evidence. Each edge states what a source records; none of it establishes identity, intent or culpability.",
+      filter: { entity_types: types.length ? types : "all", search: query.trim() || null },
+      nodes: shown.map((node) => ({
+        id: node.id,
+        label: node.label,
+        entity_type: node.entity_type,
+        recorded_observations: weight.get(node.id) || 0,
+      })),
+      relationships: shownEdges.map((edge) => ({
+        subject_entity_id: edge.subject_entity_id,
+        object_entity_id: edge.object_entity_id,
+        relation_types: edge.relation_types,
+        confidence: edge.confidence,
+        recorded_observations: edge.observations,
+        supporting_evidence_files: edge.supporting_evidence_count,
+      })),
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "drishyam-network.json";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const present = useMemo(() => [...new Set(nodes.map((node) => node.entity_type))].sort(), [nodes]);
+  const toggleType = (type) => setTypes((current) => (current.includes(type) ? current.filter((item) => item !== type) : [...current, type]));
+
   if (!nodes.length) return <Blank title="No relationships to draw yet" detail="Relationships appear once evidence has been processed and identities resolved. Nothing is drawn that the evidence does not support." />;
 
   return <Card className="overflow-hidden">
@@ -120,21 +352,132 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, height = 520 }) {
       <Eyebrow>Relationship map / every edge opens at its source</Eyebrow>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">{Object.keys(RELATION_TONE).map((type) => <span key={type} className="inline-flex items-center gap-1.5 text-[8px] font-bold uppercase tracking-[.06em] text-[#7d7065]"><i className="h-1 w-4 rounded-full" style={{ background: relationTone(type) }} />{readable(type)}</span>)}</div>
     </div>
-    <div className="overflow-x-auto bg-[#fbf7f0]"><svg viewBox="0 0 900 520" style={{ height }} className="w-full min-w-[820px]" role="img" aria-label="Case relationship map">
-      <defs><pattern id="net-grid" width="34" height="34" patternUnits="userSpaceOnUse"><path d="M34 0H0V34" fill="none" stroke="rgba(120,92,70,.09)" strokeWidth="1" /></pattern></defs>
-      <rect width="900" height="520" fill="url(#net-grid)" />
-      {edges.map((edge, index) => { const a = positions.get(edge.subject_entity_id); const b = positions.get(edge.object_entity_id); if (!a || !b) return null; const dim = selected && !(edge.subject_entity_id === selected || edge.object_entity_id === selected); const type = edge.relation_types?.[0] || "MENTIONED_WITH";
-        return <line key={`${edge.subject_entity_id}-${edge.object_entity_id}-${index}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={relationTone(type)} strokeWidth={Math.max(1.2, edge.confidence * 3.2)} strokeDasharray={edge.confidence < 0.5 ? "5 4" : undefined} strokeLinecap="round" opacity={dim ? 0.15 : 0.85} />; })}
-      {nodes.map((node) => { const point = positions.get(node.id); if (!point) return null; const dim = selected && node.id !== selected && !touching.has(node.id); const active = node.id === selected;
-        return <g key={node.id} transform={`translate(${point.x},${point.y})`} opacity={dim ? 0.25 : 1} className="cursor-pointer" onClick={() => onSelect?.(active ? null : node.id)}>
-          <circle r={active ? 15 : 11} fill={entityTone(node.entity_type)} stroke={active ? "#8e2d28" : "#fffdf8"} strokeWidth={active ? 3 : 2} />
-          <text y={-22} textAnchor="middle" className="fill-[#2e2520] text-[9px] font-bold">{node.label?.length > 19 ? `${node.label.slice(0, 18)}…` : node.label}</text>
-          <text y={28} textAnchor="middle" className="fill-[#94867a] text-[7px] font-bold uppercase tracking-[.1em]">{node.entity_type}</text>
-        </g>; })}
-    </svg></div>
-    <p className="border-t border-[#eadfd3] px-4 py-2.5 text-[8px] leading-4 text-[#8a7d71]">A thicker line means the source states the relationship more firmly. A dashed line is co-occurrence only: the source named both in one record and stated no relationship between them.</p>
+
+    {/* ------------------------------------------------------------ controls */}
+    <div className="flex flex-wrap items-center gap-2 border-b border-[#eadfd3] bg-[#fffdf8] px-4 py-2.5">
+      <span className="text-[8px] font-bold uppercase tracking-[.12em] text-[#8a7d71]">Show</span>
+      <Chip active={!types.length} onClick={() => setTypes([])}>All</Chip>
+      {present.map((type) => <Chip key={type} active={types.includes(type)} onClick={() => toggleType(type)}>{readable(type)}</Chip>)}
+
+      <label className="ml-auto flex items-center gap-1.5 rounded-lg border border-[#ded0c0] bg-white px-2.5 py-1.5">
+        <Search size={11} className="text-[#a0917f]" />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find in this map" className="w-36 bg-transparent text-[9px] outline-none placeholder:text-[#a49487]" />
+      </label>
+      <button onClick={reset} title="Reset the view and release every pinned node" className="rounded-lg border border-[#ded0c0] bg-white px-2.5 py-1.5 text-[9px] font-bold text-[#6b5b51] transition hover:border-[#bd8177] hover:bg-[#fff5f1]">Reset</button>
+      <button onClick={exportJson} className="inline-flex items-center gap-1.5 rounded-lg border border-[#dbcbbd] bg-[#fffaf4] px-2.5 py-1.5 text-[9px] font-bold text-[#8f302b] transition hover:border-[#b36b62] hover:bg-[#fff2ef]"><Download size={11} />Export JSON</button>
+    </div>
+
+    {matches && <p className="border-b border-[#eadfd3] bg-[#fff8f0] px-4 py-1.5 text-[9px] text-[#6e6258]">{matches.size === 0 ? <>Nothing in this map is written that way. That is a fact about what is drawn, not about the case.</> : <>{matches.size} {matches.size === 1 ? "identity matches" : "identities match"} and {matches.size === 1 ? "is" : "are"} ringed below.</>}</p>}
+
+    <div className="bg-[#fbf7f0]">
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+        style={{ height, touchAction: "none" }}
+        className="w-full cursor-grab active:cursor-grabbing"
+        role="img"
+        aria-label="Case relationship map"
+        onPointerDown={startPan}
+        onPointerMove={onMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onWheel={onWheel}
+      >
+        <defs><pattern id="net-grid" width="34" height="34" patternUnits="userSpaceOnUse"><path d="M34 0H0V34" fill="none" stroke="rgba(120,92,70,.09)" strokeWidth="1" /></pattern></defs>
+        <rect width={WIDTH} height={HEIGHT} fill="url(#net-grid)" />
+
+        <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+          {shownEdges.map((edge, index) => {
+            const a = positions.get(edge.subject_entity_id);
+            const b = positions.get(edge.object_entity_id);
+            if (!a || !b) return null;
+            const near = !selected || edge.subject_entity_id === selected || edge.object_entity_id === selected;
+            const type = edge.relation_types?.[0] || "MENTIONED_WITH";
+            // The type is written on the line only where a reader is already looking: on every edge
+            // at once it becomes a wall of text, and the colour legend carries the rest.
+            const labelled = near && selected && view.k > 0.55;
+            return <g key={`${edge.subject_entity_id}-${edge.object_entity_id}-${index}`} opacity={near ? 0.9 : 0.12}>
+              <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={relationTone(type)} strokeWidth={Math.max(1.2, edge.confidence * 3.2)} strokeDasharray={edge.confidence < 0.5 ? "5 4" : undefined} strokeLinecap="round" />
+              {labelled && <text x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 4} textAnchor="middle" className="pointer-events-none fill-[#6b5d52] text-[7px] font-bold uppercase tracking-[.08em]" style={{ paintOrder: "stroke", stroke: "#fbf7f0", strokeWidth: 3 }}>{readable(type)}</text>}
+            </g>;
+          })}
+
+          {shown.map((node) => {
+            const point = positions.get(node.id);
+            if (!point) return null;
+            const active = node.id === selected;
+            const dim = selected && !active && !touching.has(node.id);
+            const found = matches?.has(node.id);
+            // Radius from how much this case records about the identity, floored so a single
+            // observation is still clickable and capped so one busy node cannot swallow the frame.
+            const radius = 9 + Math.round(((weight.get(node.id) || 1) / heaviest) * 9);
+            return <g
+              key={node.id}
+              transform={`translate(${point.x},${point.y})`}
+              opacity={dim ? 0.22 : 1}
+              className="cursor-pointer"
+              onPointerDown={(event) => startNodeDrag(event, node.id)}
+              onPointerMove={onMove}
+              onPointerUp={(event) => { const moved = drag.current?.moved; endDrag(); if (!moved) onSelect?.(active ? null : node.id); event.stopPropagation(); }}
+              onDoubleClick={(event) => { event.stopPropagation(); onOpen?.(node.id); }}
+              onPointerEnter={() => setHovered(node.id)}
+              onPointerLeave={() => setHovered((current) => (current === node.id ? null : current))}
+            >
+              {found && <circle r={radius + 7} fill="none" stroke="#8a5f1c" strokeWidth={2} strokeDasharray="3 3" />}
+              <circle r={active ? radius + 4 : radius} fill={entityTone(node.entity_type)} stroke={active ? "#8e2d28" : "#fffdf8"} strokeWidth={active ? 3 : 2} />
+              <text y={-radius - 9} textAnchor="middle" className="pointer-events-none fill-[#2e2520] text-[9px] font-bold" style={{ paintOrder: "stroke", stroke: "#fbf7f0", strokeWidth: 3 }}>{node.label?.length > 19 ? `${node.label.slice(0, 18)}…` : node.label}</text>
+              <text y={radius + 15} textAnchor="middle" className="pointer-events-none fill-[#94867a] text-[7px] font-bold uppercase tracking-[.1em]">{node.entity_type}</text>
+              {hovered === node.id && <title>{`${node.label} — ${weight.get(node.id) || 0} recorded observation(s) in this case`}</title>}
+            </g>;
+          })}
+        </g>
+      </svg>
+    </div>
+
+    <p className="border-t border-[#eadfd3] px-4 py-2.5 text-[8px] leading-4 text-[#8a7d71]">
+      A thicker line means the source states the relationship more firmly. A dashed line is co-occurrence only: the source named both in one record and stated no relationship between them. A larger circle means this case records more observations involving that identity — it is a count of what was read, not a measure of importance or involvement. Click a node to see what it connects to; double-click to open it where it was read. Drag a node to pin it, drag the background to pan, scroll to zoom.
+    </p>
   </Card>;
 }
+
+
+/**
+ * Which evidence files a single identifier appears in.
+ *
+ * This answers a different question from the map above it. The map asks which identities are
+ * connected to each other; this asks which files carry the same identifier — and those are not the
+ * same claim. A number appearing in four files links the files. It does not establish that one
+ * person is behind all four, and the caveat the server sends with each row says so.
+ *
+ * It moved here when the "Graph" tab was removed. That tab drew no graph, and this was the only
+ * thing on it the network view did not already say better.
+ */
+function SharedIdentifiers({ connections }: { connections: GraphRecord["connections"] }) {
+  const rows = connections ?? [];
+  if (!rows.length) {
+    return <Blank
+      title="No identifier is shared between files yet"
+      detail="This appears once the same identifier has been read out of more than one evidence file in this case."
+    />;
+  }
+
+  const tone = (band: string) => (band === "strong" ? "green" : band === "moderate" ? "amber" : "grey");
+
+  return <div className="space-y-2">
+    {rows.map((item) => <div key={`${item.identifier_label}-${item.identifier}`} className="rounded-xl border border-[#e6d9c9] bg-[#fffdf8] p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded-full border border-[#dfd0c0] bg-white px-2.5 py-1 text-[8px] font-bold uppercase tracking-wider text-[#8f3f37]">{item.identifier_label}</span>
+        <b className="mono text-[11px] font-bold text-[#382b25]">{item.identifier}</b>
+        <Pill tone={tone(item.strength_band)}>{item.strength_band} link</Pill>
+        <span className="text-[9px] text-[#8a7d71]">{item.evidence_count} file{item.evidence_count === 1 ? "" : "s"}</span>
+      </div>
+      <p className="mt-2 text-[9px] leading-5 text-[#6b5d52]">{item.sentence}</p>
+      <p className="mono mt-1 truncate text-[8px] text-[#9b8a7c]">{item.evidence_names.join(" · ")}</p>
+      {item.caveat && <p className="mt-1.5 text-[8px] leading-4 text-[#94867a]">{item.caveat}</p>}
+    </div>)}
+  </div>;
+}
+
 
 function Drawer({ title, eyebrow, onClose, children, wide = false }) {
   return <><button aria-label="Close detail" onClick={onClose} className="fixed inset-0 z-[70] bg-[#2e2520]/45 backdrop-blur-[1px]" />
@@ -213,7 +556,7 @@ function EntityDrawer({ entity, caseId, onClose, say }) {
 }
 
 export default function NetworkIntelligence({ caseId, say }: { caseId: string; say: (message: string) => void }) {
-  const [data, setData] = useState({ overview: null, important: [], bridges: [], communities: [], summary: [], relations: [] });
+  const [data, setData] = useState({ overview: null, important: [], bridges: [], communities: [], summary: [], relations: [], connections: [] });
   const [metric, setMetric] = useState<ImportanceMetric>("betweenness_centrality");
   const [minConfidence, setMinConfidence] = useState(0);
   const [typeFilter, setTypeFilter] = useState("");
@@ -235,12 +578,13 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [overview, important, bridges, communities, summary, relationPage] = await Promise.all([
+      const [overview, important, bridges, communities, summary, relationPage, graph] = await Promise.all([
         getNetworkOverview(caseId), getImportantEntities(caseId, { metric, min_confidence: minConfidence, limit: 12 }),
         getNetworkBridges(caseId, minConfidence), getNetworkCommunities(caseId, minConfidence),
         getEntityRelationSummary(caseId), getEntityRelations(caseId, { limit: 300, relation_type: typeFilter || undefined }),
+        getGraph(caseId),
       ]);
-      setData({ overview, important, bridges, communities, summary, relations: relationPage.items });
+      setData({ overview, important, bridges, communities, summary, relations: relationPage.items, connections: graph.connections ?? [] });
     } catch (error) { notify.current(getApiErrorMessage(error, "The network could not be loaded for this case.")); }
     finally { setLoading(false); }
   }, [caseId, metric, minConfidence, typeFilter]);
@@ -292,8 +636,23 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
   // Clicking a node does both things a reader wants at once: it dims the rest of the map to what
   // this entity touches, and it opens the evidence that put the entity on the map at all. Clicking
   // the selected node again clears both.
+  /**
+   * One click highlights. It does not open anything.
+   *
+   * Highlighting and opening the evidence used to happen together, which meant a reader who only
+   * wanted to see what a node connects to got a panel over the map they were reading. Seeing the
+   * neighbourhood is the cheaper question and deserves the cheaper gesture.
+   */
   const selectNode = (nodeId) => {
-    if (!nodeId || nodeId === selectedNode) { setSelectedNode(null); setSourceRequest(null); return; }
+    if (!nodeId || nodeId === selectedNode) { setSelectedNode(null); return; }
+    setSelectedNode(nodeId);
+  };
+
+  /** Two clicks open the identity where it was read. Deliberate, because it covers the map. */
+  const openNode = (nodeId) => {
+    if (!nodeId) return;
+    // Forced rather than toggled: the second click of a double-click would otherwise deselect the
+    // node it is about to open, leaving the panel describing something the map no longer marks.
     setSelectedNode(nodeId);
     const node = canvas.nodes.find((item) => item.id === nodeId);
     openEntitySource(nodeId, node?.label ?? "This entity");
@@ -329,7 +688,7 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
       {[0, 0.5, 0.8].map((value) => <Chip key={value} active={minConfidence === value} onClick={() => setMinConfidence(value)}>{value === 0 ? "All" : value.toFixed(1)}</Chip>)}
     </div>
 
-    <NetworkCanvas nodes={canvas.nodes} edges={canvas.edges} selected={selectedNode} onSelect={selectNode} />
+    <NetworkCanvas nodes={canvas.nodes} edges={canvas.edges} selected={selectedNode} onSelect={selectNode} onOpen={openNode} />
 
     <div><div className="mb-2 flex items-center gap-2"><Network size={14} className="text-[#8e2d28]" /><Eyebrow>Most important entities / review priority, not guilt</Eyebrow></div>
       {/* The three rankings often agree on who is first and differ only in the score beneath it, and
@@ -347,6 +706,12 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
         {communities.length === 0 ? <p className="text-[9px] leading-5 text-[#88796d]">The network is not yet large enough to separate into groups.</p> : <div className="space-y-2">{communities.slice(0, 6).map((cluster) => <div key={cluster.community_id} className="rounded-xl border border-[#e6d9c9] bg-[#fbf7f0] p-3"><div className="flex items-center justify-between gap-2"><b className="text-[10px] text-[#2e2520]">Group {cluster.community_id + 1}</b><Pill tone="blue">{cluster.size} entities</Pill></div><p className="mt-1.5 text-[9px] leading-5 text-[#6b5d52]">{cluster.members.slice(0, 6).map((member) => member.label).filter(Boolean).join(", ")}{cluster.members.length > 6 ? ` and ${cluster.members.length - 6} more` : ""}</p></div>)}<p className="pt-1 text-[8px] leading-4 text-[#94867a]">{communities[0]?.caveat}</p></div>}
       </Card>
     </div>
+
+    <Card className="p-4 sm:p-5">
+      <div className="mb-1 flex items-center gap-2"><Link2 size={14} className="text-[#2b6b8b]" /><Eyebrow>Identifiers shared between files / a link between records, not between people</Eyebrow></div>
+      <p className="mb-3 text-[9px] leading-4 text-[#8a7d71]">The map above joins identities to each other. This says which evidence files carry the same identifier — a different and weaker claim, kept separate for that reason.</p>
+      <SharedIdentifiers connections={data.connections} />
+    </Card>
 
     <Card className="p-4 sm:p-5"><div className="mb-3 flex items-center gap-2"><Route size={14} className="text-[#365f70]" /><Eyebrow>Trace a connection / "no path" is a real answer</Eyebrow></div>
       <div className="flex flex-wrap items-end gap-2">

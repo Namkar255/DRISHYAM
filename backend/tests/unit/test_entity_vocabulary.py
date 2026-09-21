@@ -74,7 +74,7 @@ def test_organisations_need_a_legal_or_business_suffix(text: str, expected: str)
     assert expected in patterns.find_organisations(text)
 
 
-@pytest.mark.parametrize("text", ["the bank said no", "he paid the amount", "Ravi Kumar met Suresh"])
+@pytest.mark.parametrize("text", ["the bank said no", "he paid the amount", "Ravi Kumar met Yash"])
 def test_a_capitalised_phrase_alone_is_not_an_organisation(text: str) -> None:
     assert patterns.find_organisations(text) == []
 
@@ -134,7 +134,7 @@ def test_text_without_a_place_marker_yields_no_location(text: str) -> None:
     ("text", "expected"),
     [
         ("Complainant: Ravi Kumar", "Ravi Kumar"),
-        ("Accused - Suresh Yadav", "Suresh Yadav"),
+        ("Accused - Yash Kumar Gupta", "Yash Kumar Gupta"),
         ("Name: Priya Sharma", "Priya Sharma"),
         ("Beneficiary: Anil Gupta", "Anil Gupta"),
         ("Ravi Kumar S/o Mohan Lal", "Mohan Lal"),
@@ -149,7 +149,7 @@ def test_a_person_is_read_only_where_a_role_is_stated(text: str, expected: str) 
     [
         "Mumbai Central Station is busy",  # a place, capitalised
         "The Accused was seen leaving",  # a role with no name after it
-        "Ravi met Suresh yesterday",  # names with no stated role
+        "Ravi met Yash yesterday",  # names with no stated role
         "To: ravi@example.com",  # a labelled identifier, not a name
         "From: +91 98765 43210",
     ],
@@ -201,7 +201,7 @@ def test_a_grouped_phone_number_is_never_read_as_money() -> None:
 _FIR = """FIRST INFORMATION REPORT
 FIR No: 0142/2026        PS Andheri East, District Mumbai Suburban
 Complainant: Ravi Kumar S/o Mohan Lal
-Accused: Suresh Yadav
+Accused: Yash Kumar Gupta
 Contact: +91 98765 43210
 On 12/03/2026 at 21:15 a vehicle MH12DE1433 was seen near Linking Road.
 A payment of INR 25,000 was made to Shreeji Traders Pvt. Ltd.

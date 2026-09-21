@@ -23,7 +23,7 @@ const REFUSALS = [
   {
     icon: SplitSquareVertical,
     eyebrow: "It will not merge two people who share a name",
-    shown: "Suresh Yadav · Suresh Yadava",
+    shown: "Yash Kumar Gupta · Yash Kumar Gupt",
     verdict: "two nodes, never one",
     body:
       "Named in different sources, one letter apart. Two people share a name far more often than they share an account. Whether they are the same person is a review decision, never an extraction one.",
@@ -31,7 +31,7 @@ const REFUSALS = [
   {
     icon: Scale,
     eyebrow: "It will not tell you who is guilty",
-    shown: "“Is Suresh Yadav guilty?”",
+    shown: "“Is Yash Kumar Gupta guilty?”",
     verdict: "answered with a refusal",
     body:
       "This system does not decide who is responsible, and nothing in a case file can settle that. It will show what the evidence records, and say plainly that the showing is not the deciding.",

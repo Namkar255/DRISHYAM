@@ -36,6 +36,7 @@ from app.models.entities import (
     Severity,
 )
 from app.services import temporal
+from app.services.entity_resolution import canonicalize_indicator
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +467,83 @@ def _sudden_silence(db: Session, case_id: str, entities: dict[str, Entity]) -> i
     return raised
 
 
+def _shared_device(db: Session, case_id: str) -> int:
+    """Two or more identifiers recorded against the same handset.
+
+    This is the strongest thing a call detail record carries beyond the calls themselves, and no
+    amount of analysing who rang whom will find it: one person running two numbers leaves exactly
+    this trace and nothing else does. It is also why a CDR's IMEI column is worth reading at all.
+
+    What it does not say is which of two explanations applies. One person using two numbers, a
+    handset sold on, a phone borrowed for an evening, a SIM moved after a number was blocked -- the
+    record shows the numbers and the handset, and is silent on the rest. The wording keeps it that
+    way, because "these belong to the same person" is the conclusion an investigator reaches after
+    checking, not one this rule is entitled to hand them.
+    """
+    records = db.scalars(
+        select(NormalizedRecord).where(
+            NormalizedRecord.case_id == case_id, NormalizedRecord.device_identifier.isnot(None)
+        )
+    ).all()
+
+    on_handset: dict[str, dict[str, list[NormalizedRecord]]] = defaultdict(lambda: defaultdict(list))
+    for record in records:
+        device = str(record.device_identifier).strip()
+        if not device:
+            continue
+
+        # Whose handset this is. A call record's IMEI belongs to the subscriber whose record it is
+        # -- the calling party -- and not to the number they rang. Attributing it to every number on
+        # the row would have this rule announce that two people share a handset on the evidence of a
+        # single call between them, which is exactly the false accusation it exists to avoid.
+        owner = record.sender
+        if not owner:
+            numbers = list(record.phone_numbers or [])
+            # One number and one handset on a record is unambiguous. Several numbers and no stated
+            # owner is not, and a guess here is a guess about whose phone it is.
+            owner = numbers[0] if len(numbers) == 1 else None
+        if not owner:
+            continue
+
+        resolved = canonicalize_indicator("phone", str(owner))
+        if resolved is None:
+            continue
+        on_handset[device][resolved.canonical_value].append(record)
+
+    places = _record_places(db, case_id)
+    raised = 0
+    for device, numbers in on_handset.items():
+        if len(numbers) < 2:
+            continue
+        evidence_ids = sorted({item.evidence_id for rows in numbers.values() for item in rows})
+        written = sorted(numbers)
+        raised += _raise(
+            db,
+            case_id=case_id,
+            rule_code="SHARED_DEVICE",
+            key=device,
+            severity=Severity.HIGH,
+            explanation=(
+                f"Review lead: {len(numbers)} different numbers are recorded against the same handset "
+                f"({device}) across {len(evidence_ids)} evidence file(s): {', '.join(written)}. "
+                "A handset shared between numbers can mean one person using both, a phone passed on, or a "
+                "SIM moved after a number stopped working. The record shows which numbers and which handset; "
+                "it does not say which of those it was."
+            ),
+            evidence_ids=evidence_ids,
+            sequence=narrative.sequence(
+                _record_step(
+                    item,
+                    f"{number} is recorded on handset {device}.",
+                    places,
+                )
+                for number, rows in sorted(numbers.items())
+                for item in rows
+            ),
+        )
+    return raised
+
+
 def evaluate_network_alerts(db: Session, case_id: str) -> dict[str, int]:
     """Run every criminal-network rule for one case. Safe to run repeatedly."""
     entities = {item.id: item for item in db.scalars(select(Entity).where(Entity.case_id == case_id)).all()}
@@ -479,6 +557,7 @@ def evaluate_network_alerts(db: Session, case_id: str) -> dict[str, int]:
         "late_arriving_identity": _late_arriving_identity(db, case_id, entities),
         "vehicle_corridor": _vehicle_corridor(db, case_id),
         "sudden_silence": _sudden_silence(db, case_id, entities),
+        "shared_device": _shared_device(db, case_id),
     }
     counts["total_new"] = sum(counts.values())
     counts["rules_version"] = NETWORK_RULES_VERSION  # type: ignore[assignment]

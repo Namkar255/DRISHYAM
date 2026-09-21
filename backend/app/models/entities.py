@@ -484,6 +484,49 @@ class CaseNote(Base):
     __table_args__ = (Index("ix_case_notes_subject", "case_id", "subject_type", "subject_id"),)
 
 
+class PriorRecord(Base):
+    """One entry in the national record of registered cases, as this deployment holds it.
+
+    This is a different source from the shared ledger and answers a different question. The ledger
+    says another force is working a live case that touches this identity, and deliberately holds
+    nothing else. This says a case involving this identity was registered before, and comes from an
+    authoritative record that is entitled to hold the details -- an NCRB or CCTNS extract in a real
+    deployment, and a synthetic dataset here.
+
+    **Disposal is not optional.** A record store that showed convictions and quietly omitted
+    acquittals and closures would be a lie told by arithmetic, and it is the lie that turns a
+    lookup into an accusation. Every row carries what actually happened to the case.
+
+    Nothing here is evidence in the case a reader is working. Under section 46 of the Bharatiya
+    Sakshya Adhiniyam a person's previous bad character is generally not relevant, and "he did it
+    before" is precisely the reasoning the rest of this product refuses to make. The record is here
+    so an investigator can find the officer who dealt with it, not so a case can lean on it.
+    """
+
+    __tablename__ = "prior_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    # The canonical form the resolver produces, so a number written four ways still matches.
+    identifier_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    identifier_value: Mapped[str] = mapped_column(String(512), index=True, nullable=False)
+    subject_name: Mapped[str | None] = mapped_column(String(160))
+    record_reference: Mapped[str] = mapped_column(String(96), nullable=False)
+    police_station: Mapped[str] = mapped_column(String(160), nullable=False)
+    district: Mapped[str | None] = mapped_column(String(160))
+    sections: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    registered_on: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # What became of it: under_investigation, chargesheeted, convicted, acquitted, closed, quashed.
+    disposal: Mapped[str] = mapped_column(String(32), nullable=False)
+    disposal_on: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    contact_officer: Mapped[str | None] = mapped_column(String(320))
+    source: Mapped[str] = mapped_column(String(96), nullable=False, default="synthetic-national-dataset")
+
+    __table_args__ = (
+        Index("ix_prior_records_identifier", "identifier_type", "identifier_value"),
+        UniqueConstraint("record_reference", "identifier_type", "identifier_value", name="uq_prior_record_identity"),
+    )
+
+
 class LedgerEntry(Base):
     """One identifier published to the shared ledger, as a hash and nothing else.
 

@@ -2,7 +2,7 @@
 
 The page lists the ways an identity was written down. Listing them together records how the case
 wrote it; it does not decide they are one person. That distinction is the whole reason the two
-Sureshes in the benchmark case stay two people, and a page that quietly joined them would undo the
+Yashes in the benchmark case stay two people, and a page that quietly joined them would undo the
 restraint the extraction layer is built around.
 
 The other line is disclosure. A profile may say that another case knows this identifier only when
@@ -71,12 +71,12 @@ def test_it_lists_every_way_the_identity_was_written(profiled_case) -> None:
 def test_an_alias_list_is_not_a_merge(profiled_case) -> None:
     """Two names one letter apart stay two profiles. The page records spellings; it decides nothing."""
     case, _ = profiled_case
-    one = _profile(case["id"], "Suresh Yadav")
-    two = _profile(case["id"], "Suresh Yadava")
+    one = _profile(case["id"], "Yash Kumar Gupta")
+    two = _profile(case["id"], "Yash Kumar Gupt")
 
     assert one.entity_id != two.entity_id
-    assert "Suresh Yadava" not in [alias.value for alias in one.aliases]
-    assert "Suresh Yadav" not in [alias.value for alias in two.aliases]
+    assert "Yash Kumar Gupt" not in [alias.value for alias in one.aliases]
+    assert "Yash Kumar Gupta" not in [alias.value for alias in two.aliases]
     assert "does not decide" in one.alias_caveat
 
 
@@ -103,8 +103,8 @@ def test_every_relationship_carries_its_source_and_meaning(profiled_case) -> Non
 
 def test_the_role_a_source_stated_reaches_the_profile(profiled_case) -> None:
     case, _ = profiled_case
-    assert _profile(case["id"], "Suresh Yadav").roles == ["accused"]
-    assert _profile(case["id"], "Suresh Yadava").roles == ["self-identified"]
+    assert _profile(case["id"], "Yash Kumar Gupta").roles == ["accused"]
+    assert _profile(case["id"], "Yash Kumar Gupt").roles == ["self-identified"]
 
 
 # --------------------------------------------------------------------------- chronology
@@ -131,11 +131,11 @@ def test_the_chronology_is_in_order(profiled_case) -> None:
 
 def test_an_identity_connected_to_nothing_still_renders(profiled_case) -> None:
     case, _ = profiled_case
-    profile = _profile(case["id"], "Suresh Yadava")
+    profile = _profile(case["id"], "Yash Kumar Gupt")
 
     assert profile.connections == []
     assert profile.appearances, "it was seen somewhere, even with nothing stated about it"
-    assert profile.label == "Suresh Yadava"
+    assert profile.label == "Yash Kumar Gupt"
 
 
 # --------------------------------------------------------------------------- disclosure
@@ -205,12 +205,12 @@ def test_an_outsider_is_told_nothing_about_other_cases(client, case_factory, acc
 
 def test_the_endpoint_returns_the_profile(client, profiled_case) -> None:
     case, headers = profiled_case
-    entity = _entity(case["id"], "Suresh Yadav")
+    entity = _entity(case["id"], "Yash Kumar Gupta")
     response = client.get(f"/api/v1/cases/{case['id']}/grounded/entities/{entity.id}/profile", headers=headers)
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["label"] == "Suresh Yadav"
+    assert body["label"] == "Yash Kumar Gupta"
     assert body["roles"] == ["accused"]
     assert body["alias_caveat"] and body["other_case_caveat"]
     assert "aliases" in body and "appearances" in body and "connections" in body
@@ -219,6 +219,6 @@ def test_the_endpoint_returns_the_profile(client, profiled_case) -> None:
 def test_an_entity_from_another_case_is_not_profiled(client, profiled_case, case_factory) -> None:
     case, headers = profiled_case
     other, _ = case_factory(headers)
-    entity = _entity(case["id"], "Suresh Yadav")
+    entity = _entity(case["id"], "Yash Kumar Gupta")
     response = client.get(f"/api/v1/cases/{other['id']}/grounded/entities/{entity.id}/profile", headers=headers)
     assert response.status_code == 404

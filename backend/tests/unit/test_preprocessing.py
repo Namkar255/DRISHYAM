@@ -31,7 +31,7 @@ def page() -> Image.Image:
     image = Image.new("RGB", (1080, 700), (250, 248, 244))
     draw = ImageDraw.Draw(image)
     for index, line in enumerate(
-        ["FIRST INFORMATION REPORT", "FIR No: 0142/2026", "Accused: Suresh Yadav", "Vehicle MH12DE1433"]
+        ["FIRST INFORMATION REPORT", "FIR No: 0142/2026", "Accused: Yash Kumar Gupta", "Vehicle MH12DE1433"]
     ):
         draw.text((70, 80 + index * 120), line, font=_font(52), fill=(20, 20, 20))
     return image

@@ -39,8 +39,8 @@ FIR_TEXT = """FIRST INFORMATION REPORT
 FIR No: 0142/2026    Police Station: Andheri East
 Offence u/s 420, 406 IPC
 Complainant: Ravi Kumar S/o Mohan Lal
-The complainant states that accused Suresh Yadav was driving vehicle MH12DE1433 near the toll plaza.
-Accused Suresh Yadav was seen at Linking Road on the same evening.
+The complainant states that accused Yash Kumar Gupta was driving vehicle MH12DE1433 near the toll plaza.
+Accused Yash Kumar Gupta was seen at Linking Road on the same evening.
 """
 
 
@@ -70,7 +70,7 @@ def test_report_fields_stay_absent_when_the_source_has_no_header(text: str) -> N
 @pytest.mark.parametrize(
     ("sentence", "expected"),
     [
-        ("The complainant states that accused Suresh Yadav was driving vehicle MH12DE1433.", ("Suresh Yadav", "MH12DE1433")),
+        ("The complainant states that accused Yash Kumar Gupta was driving vehicle MH12DE1433.", ("Yash Kumar Gupta", "MH12DE1433")),
         ("Complainant: Ravi Kumar used MH12DE1433 on that day.", ("Ravi Kumar", "MH12DE1433")),
     ],
 )
@@ -82,7 +82,7 @@ def test_a_person_is_linked_to_a_vehicle_only_by_a_stated_verb(sentence: str, ex
     "text",
     [
         # Two sentences: the source states nothing that joins them.
-        "Accused: Suresh Yadav fled. Vehicle MH12DE1433 was recovered later.",
+        "Accused: Yash Kumar Gupta fled. Vehicle MH12DE1433 was recovered later.",
         # One sentence, but no verb of use.
         "Complainant: Ravi Kumar and vehicle MH12DE1433 are listed in the annexure.",
     ],
@@ -92,15 +92,15 @@ def test_a_vehicle_link_is_refused_without_a_stated_verb_in_the_same_sentence(te
 
 
 def test_a_person_is_placed_only_by_a_stated_verb() -> None:
-    links = patterns.find_person_location_links("Accused Suresh Yadav was seen at Linking Road on the same evening.")
-    assert [(person, place) for person, place, _ in links] == [("Suresh Yadav", "Linking Road")]
+    links = patterns.find_person_location_links("Accused Yash Kumar Gupta was seen at Linking Road on the same evening.")
+    assert [(person, place) for person, place, _ in links] == [("Yash Kumar Gupta", "Linking Road")]
 
 
 @pytest.mark.parametrize(
     "text",
     [
         "Complainant: Ravi Kumar filed the report. Linking Road is nearby.",
-        "Accused: Suresh Yadav and Linking Road appear in the annexure.",
+        "Accused: Yash Kumar Gupta and Linking Road appear in the annexure.",
     ],
 )
 def test_a_location_link_is_refused_without_a_stated_verb(text: str) -> None:
@@ -110,8 +110,8 @@ def test_a_location_link_is_refused_without_a_stated_verb(text: str) -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("The complainant states that accused Suresh Yadav was driving.", ["Suresh Yadav"]),
-        ("Accused Suresh Yadav was seen at Linking Road.", ["Suresh Yadav"]),
+        ("The complainant states that accused Yash Kumar Gupta was driving.", ["Yash Kumar Gupta"]),
+        ("Accused Yash Kumar Gupta was seen at Linking Road.", ["Yash Kumar Gupta"]),
         ("driver Anil Gupta refused to stop", ["Anil Gupta"]),
     ],
 )

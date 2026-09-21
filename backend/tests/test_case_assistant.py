@@ -64,8 +64,8 @@ def _entities(case_id: str) -> list[Entity]:
 
 def test_a_question_word_is_not_mistaken_for_a_name() -> None:
     """A leading "What" is capitalised because the sentence starts there, not because it names anybody."""
-    terms = case_assistant._candidate_terms("What evidence connects Suresh Yadav with MH12DE1433?")
-    assert "Suresh Yadav" in terms
+    terms = case_assistant._candidate_terms("What evidence connects Yash Kumar Gupta with MH12DE1433?")
+    assert "Yash Kumar Gupta" in terms
     assert "MH12DE1433" in terms
     assert not any(term.lower() in {"what", "who", "tell", "show", "which"} for term in terms)
 
@@ -97,7 +97,7 @@ def test_a_name_matches_itself_not_the_one_it_is_a_prefix_of(processed_case) -> 
     """Keeping two people apart in the graph is worth nothing if a question about one returns
     the other.
 
-    Matching by substring answered "Suresh Yadav" with the record for "Suresh Yadava" -- the
+    Matching by substring answered "Yash Kumar Gupta" with the record for "Yash Kumar Gupt" -- the
     different person the surveillance note names -- so the distinction the storage layer
     protects was lost at the moment anybody asked about it.
     """
@@ -204,7 +204,7 @@ def test_every_finding_names_the_evidence_it_came_from(processed_case) -> None:
 @pytest.mark.parametrize(
     "question",
     [
-        "Is Suresh Yadav guilty?",
+        "Is Yash Kumar Gupta guilty?",
         "Who is the culprit?",
         "Who is responsible for this fraud?",
         "Prove that Ravi Kumar did it",
@@ -218,7 +218,7 @@ def test_a_question_asking_for_a_verdict_is_refused(processed_case, question: st
 
 @pytest.mark.parametrize(
     "question",
-    ["Give me an overview", "Who is the most important entity?", "What alerts are open?", "Is Suresh Yadav guilty?"],
+    ["Give me an overview", "Who is the most important entity?", "What alerts are open?", "Is Yash Kumar Gupta guilty?"],
 )
 def test_no_answer_asserts_criminality(processed_case, question: str) -> None:
     """A caveat may name guilt in order to disclaim it; nothing may assert it."""

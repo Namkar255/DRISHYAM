@@ -27,7 +27,7 @@ type Node = {
 };
 
 const NODES: Node[] = [
-  { id: "suresh", label: "Suresh Yadav", kind: "PERSON", icon: User, x: 16, y: 20 },
+  { id: "yash", label: "Yash Kumar Gupta", kind: "PERSON", icon: User, x: 16, y: 20 },
   { id: "phone-a", label: "+91 98765 43210", kind: "PHONE", icon: Phone, x: 47, y: 12, accent: true },
   { id: "ravi", label: "Ravi Kumar", kind: "PERSON", icon: User, x: 80, y: 22 },
   { id: "vehicle", label: "MH12DE1433", kind: "VEHICLE", icon: Car, x: 14, y: 68 },
@@ -36,7 +36,7 @@ const NODES: Node[] = [
 ];
 
 const EDGES: { from: string; to: string; label: string }[] = [
-  { from: "suresh", to: "phone-a", label: "NAMED WITH" },
+  { from: "yash", to: "phone-a", label: "NAMED WITH" },
   { from: "phone-a", to: "ravi", label: "CALLED" },
   { from: "vehicle", to: "place", label: "LOCATED AT" },
   { from: "phone-a", to: "place", label: "MENTIONED WITH" },
@@ -48,11 +48,14 @@ const byId = Object.fromEntries(NODES.map((node) => [node.id, node]));
 export default function NetworkPreview() {
   return (
     <section id="network" className="relative overflow-hidden bg-[#202420] py-24 text-[#f6f1e7] lg:py-32">
+      {/* The map is atmosphere, so it has to end like atmosphere. At a fixed width it stopped on a
+          hard vertical line straight down the middle of the section, cutting the heading and the
+          cards below it in two. Fading it out means the eye never finds an edge to align against. */}
       <img
         src="/assets/reference-map_e5920fd1.png"
         alt=""
         aria-hidden="true"
-        className="absolute -left-20 top-0 h-full w-[45%] object-cover opacity-[.14] mix-blend-screen"
+        className="absolute -left-20 top-0 h-full w-[52%] object-cover opacity-[.14] mix-blend-screen [mask-image:linear-gradient(to_right,black_45%,transparent_100%)] [-webkit-mask-image:linear-gradient(to_right,black_45%,transparent_100%)]"
       />
       <img
         src="/assets/workspace-map-board_c063d31f.png"

@@ -12,8 +12,8 @@
  * Every row opens at its source. Nothing here is written by a model, so every line can be checked.
  */
 import { useEffect, useState } from "react";
-import { ChevronRight, Clock, FileText, Globe2, Layers, Link2, Loader2, Users } from "lucide-react";
-import { getEntityProfile, getIdentityElsewhere, type EntityProfileRecord, type IdentityElsewhere } from "@/api/network";
+import { ChevronRight, Clock, FileText, Globe2, Layers, Link2, Loader2, Scale, Users } from "lucide-react";
+import { getEntityProfile, getIdentityElsewhere, getPriorRecord, type EntityProfileRecord, type IdentityElsewhere, type PriorRecordLookup } from "@/api/network";
 import { targetFromReference, type SourceTarget } from "@/api/sourceView";
 import { confidenceTitle, readConfidence } from "@/lib/confidence";
 
@@ -125,6 +125,103 @@ function Elsewhere({ caseId, entityId, label }: { caseId: string; entityId: stri
           )}
           <p className="mt-3 rounded-xl border border-[#d6e2ea] bg-[#f3f8fb] p-3 text-[9px] leading-5 text-[#365c70]">
             {answer.caveat}
+          </p>
+        </>
+      )}
+    </Section>
+  );
+}
+
+/**
+ * What the national record already holds about this identity.
+ *
+ * A different question from the section above it, and a different source. The shared ledger reports
+ * that another force is working a live case touching this identity and deliberately holds nothing
+ * else, because that force's file is not this reader's to see. This reads a store that is entitled
+ * to hold the details of cases already registered.
+ *
+ * **Every disposal is shown, and acquittals are not styled as failures.** A panel that made
+ * convictions loud and acquittals quiet would teach the reader the one inference this product
+ * exists to refuse. The colour says whether a case is still open, which is what changes who an
+ * investigator should ring — not whether the person was found guilty.
+ *
+ * It is a button. Looking somebody up in a criminal record is recorded against the case whatever it
+ * returns, and a check that ran on its own every time a profile opened would put that in the log
+ * without anybody having asked for it.
+ */
+function PriorRecord({ caseId, entityId, label }: { caseId: string; entityId: string; label: string }) {
+  const [found, setFound] = useState<PriorRecordLookup | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => { setFound(null); setFailed(false); }, [caseId, entityId]);
+
+  const ask = () => {
+    setAsking(true);
+    setFailed(false);
+    getPriorRecord(caseId, entityId)
+      .then(setFound)
+      .catch(() => setFailed(true))
+      .finally(() => setAsking(false));
+  };
+
+  // Open cases carry a live officer to reach. Closed ones are history, whatever the outcome was.
+  const state = (entry: PriorRecordLookup["entries"][number]) =>
+    entry.disposal_state === "open"
+      ? "border-[#ead9b8] bg-[#fff8e8] text-[#97651e]"
+      : "border-[#dcd4ca] bg-[#f6f3ee] text-[#6f6258]";
+
+  return (
+    <Section icon={Scale} title="Registered before">
+      {!found && !failed && (
+        <>
+          <Empty>
+            The national record of registered cases can say whether this identity has been named in a case before,
+            and what became of it. Running the check is recorded against this case.
+          </Empty>
+          <button
+            onClick={ask}
+            disabled={asking}
+            className="mt-3 rounded-lg border border-[#dbcbbd] bg-white px-3 py-2 text-[10px] font-bold text-[#8f302b] transition hover:border-[#b36b62] hover:bg-[#fff7f1] disabled:opacity-60"
+          >
+            {asking ? "Searching the record…" : `Check the record for ${label}`}
+          </button>
+        </>
+      )}
+
+      {failed && <Empty>The national record could not be reached. Nothing about this identity was sent.</Empty>}
+
+      {found && (
+        <>
+          <p className="text-[10px] leading-5 text-[#4f443c]">{found.statement}</p>
+
+          {found.entries.length > 0 && (
+            <div className="mt-3 space-y-2">
+              {found.entries.map((entry) => (
+                <div key={entry.record_reference} className="rounded-xl border border-[#e6ddd2] bg-[#fffdf8] p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="mono text-[10px] font-bold text-[#8f3f37]">{entry.record_reference}</span>
+                    <span className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] font-bold ${state(entry)}`}>
+                      {entry.disposal_reading}
+                    </span>
+                  </div>
+                  <p className="mt-1.5 text-[10px] text-[#2e2520]">
+                    {entry.sections.join(" · ")}
+                  </p>
+                  <p className="mono mt-1 block truncate text-[9px] text-[#847468]">
+                    {entry.police_station}{entry.district ? `, ${entry.district}` : ""} · registered {entry.registered_on}
+                    {entry.disposal_on ? ` · ${entry.disposal} ${entry.disposal_on}` : ""}
+                  </p>
+                  {entry.contact_officer && (
+                    <p className="mt-1 text-[9px] text-[#6b5d52]">Dealt with by {entry.contact_officer}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <p className="mt-3 rounded-xl border border-[#d6e2ea] bg-[#f3f8fb] p-3 text-[9px] leading-5 text-[#365c70]">
+            {found.caveat}
           </p>
         </>
       )}
@@ -307,6 +404,9 @@ export default function EntityProfilePanel({ caseId, entityId, openSource }: {
 
       {/* ------------------------------------------------------------ known to a force you cannot see */}
       <Elsewhere caseId={caseId} entityId={entityId} label={profile.label}/>
+
+      {/* ------------------------------------------------------------ and what is already on record */}
+      <PriorRecord caseId={caseId} entityId={entityId} label={profile.label}/>
     </div>
   );
 }
