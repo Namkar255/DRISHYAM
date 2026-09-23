@@ -10,7 +10,7 @@
  * right of a card at full weight the way the overview metrics use it.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, Check, Download, FileSearch, Link2, Loader2, Network, RefreshCw, Route, Search, ShieldCheck, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronDown, Download, FileSearch, FileText, Link2, Loader2, Network, RefreshCw, Route, Search, ShieldCheck, Users, X } from "lucide-react";
 import { getApiErrorMessage } from "@/api/client";
 import EvidenceSourceViewer from "@/components/EvidenceSourceViewer";
 import { CONFIDENCE_TONES, confidenceTitle, readConfidence } from "@/lib/confidence";
@@ -112,10 +112,13 @@ function ImportanceCard({ record, onOpen, onOpenSource }) {
  * dense one. Everything else — zoom, pan, filter, search — narrows what is drawn without ever
  * changing what is stated.
  */
-function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, height = 520 }) {
+function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, focusId = null, height = 520 }) {
   const WIDTH = 900;
   const HEIGHT = 520;
 
+  // How the same relationships are arranged. Only the arrangement changes -- no layout adds,
+  // removes or reweights an edge, so switching between them cannot change what the case states.
+  const [mode, setMode] = useState<"force" | "tree" | "radial" | "hierarchy" | "compact">("force");
   const [pinned, setPinned] = useState({});
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const [types, setTypes] = useState([]);
@@ -126,10 +129,26 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, height = 520 
 
   // A node the reader has not filtered away. Edges follow their endpoints: an edge to a hidden node
   // is not drawn, because a line into empty space reads as a relationship to nothing.
+  // When a subject is chosen, the map narrows to that identity and the identities it is directly
+  // related to. Everything else in the case is still there -- it is simply not this question.
+  // Narrowing is done on the node set, so an edge whose other end is out of scope is not drawn
+  // rather than drawn into nothing.
+  const neighbourhood = useMemo(() => {
+    if (!focusId) return null;
+    const keep = new Set([focusId]);
+    edges.forEach((edge) => {
+      if (edge.subject_entity_id === focusId) keep.add(edge.object_entity_id);
+      if (edge.object_entity_id === focusId) keep.add(edge.subject_entity_id);
+    });
+    return keep;
+  }, [focusId, edges]);
+
   const shown = useMemo(() => {
-    if (!types.length) return nodes;
-    return nodes.filter((node) => types.includes(node.entity_type));
-  }, [nodes, types]);
+    let list = nodes;
+    if (neighbourhood) list = list.filter((node) => neighbourhood.has(node.id));
+    if (types.length) list = list.filter((node) => types.includes(node.entity_type));
+    return list;
+  }, [nodes, types, neighbourhood]);
   const shownIds = useMemo(() => new Set(shown.map((node) => node.id)), [shown]);
   const shownEdges = useMemo(
     () => edges.filter((edge) => shownIds.has(edge.subject_entity_id) && shownIds.has(edge.object_entity_id)),
@@ -163,12 +182,82 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, height = 520 
     if (!total) return place;
     if (total === 1) { place.set(list[0].id, { x: WIDTH / 2, y: HEIGHT / 2 }); return place; }
 
+    // ---------------------------------------------------------------- arranged layouts
+    // Tree, radial and hierarchy all read distance from a root, so they need one. The chosen
+    // subject is the root; with no subject, the identity the most relationships touch. Both are
+    // facts about the drawing, not rankings of people.
+    const adjacency = new Map(list.map((node) => [node.id, [] as string[]]));
+    shownEdges.forEach((edge) => {
+      adjacency.get(edge.subject_entity_id)?.push(edge.object_entity_id);
+      adjacency.get(edge.object_entity_id)?.push(edge.subject_entity_id);
+    });
+
+    const rootId = (focusId && adjacency.has(focusId))
+      ? focusId
+      : [...adjacency.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))[0][0];
+
+    // Breadth-first, so a level is "how many stated relationships away from the root" and not an
+    // arbitrary depth. Anything the root cannot reach is put on the last level rather than
+    // dropped -- a disconnected identity is still in the case.
+    const levelOf = new Map<string, number>([[rootId, 0]]);
+    const queue = [rootId];
+    while (queue.length) {
+      const current = queue.shift() as string;
+      (adjacency.get(current) || []).forEach((next) => {
+        if (levelOf.has(next)) return;
+        levelOf.set(next, (levelOf.get(current) as number) + 1);
+        queue.push(next);
+      });
+    }
+    const deepest = Math.max(0, ...levelOf.values());
+    list.forEach((node) => { if (!levelOf.has(node.id)) levelOf.set(node.id, deepest + 1); });
+
+    const banded = (keyOf: (node: any) => string | number) => {
+      const bands = new Map<string | number, any[]>();
+      list.forEach((node) => {
+        const key = keyOf(node);
+        if (!bands.has(key)) bands.set(key, []);
+        (bands.get(key) as any[]).push(node);
+      });
+      return [...bands.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0]), undefined, { numeric: true }));
+    };
+
+    if (mode === "tree" || mode === "hierarchy") {
+      // Tree bands by distance from the root; hierarchy bands by what kind of thing it is.
+      const bands = mode === "tree"
+        ? banded((node) => levelOf.get(node.id) as number)
+        : banded((node) => node.entity_type || "unknown");
+      const gap = bands.length > 1 ? (HEIGHT - 120) / (bands.length - 1) : 0;
+      bands.forEach(([, members], band) => {
+        const y = 60 + band * gap;
+        const step = WIDTH / (members.length + 1);
+        members.forEach((node, index) => place.set(node.id, { x: step * (index + 1), y }));
+      });
+      return place;
+    }
+
+    if (mode === "radial") {
+      // The root sits at the centre and each level is a ring around it.
+      const rings = banded((node) => levelOf.get(node.id) as number);
+      const step = rings.length > 1 ? Math.min(150, (HEIGHT / 2 - 50) / (rings.length - 1)) : 0;
+      rings.forEach(([, members], ring) => {
+        if (ring === 0 && members.length === 1) { place.set(members[0].id, { x: WIDTH / 2, y: HEIGHT / 2 }); return; }
+        const radius = ring * step || 90;
+        members.forEach((node, index) => {
+          const angle = (index / members.length) * Math.PI * 2 - Math.PI / 2;
+          place.set(node.id, { x: WIDTH / 2 + Math.cos(angle) * radius * 1.5, y: HEIGHT / 2 + Math.sin(angle) * radius });
+        });
+      });
+      return place;
+    }
+
     list.forEach((node, index) => {
       const angle = (index / total) * Math.PI * 2;
       place.set(node.id, { x: WIDTH / 2 + Math.cos(angle) * 180, y: HEIGHT / 2 + Math.sin(angle) * 150 });
     });
 
-    const ideal = Math.min(150, Math.max(70, 620 / Math.sqrt(total)));
+    const roomy = Math.min(150, Math.max(70, 620 / Math.sqrt(total)));
+    const ideal = mode === "compact" ? roomy * 0.62 : roomy;
     // Every pass compares every pair, so the work grows with the square of the node count. A large
     // case gets fewer passes rather than a frozen tab: the layout is slightly looser and the page
     // still responds, which is the right trade when the alternative is neither.
@@ -231,7 +320,7 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, height = 520 
       });
     });
     return place;
-  }, [shown, shownEdges]);
+  }, [shown, shownEdges, mode, focusId]);
 
   const positions = useMemo(() => {
     const merged = new Map(layout);
@@ -342,7 +431,7 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, height = 520 
     URL.revokeObjectURL(url);
   };
 
-  const present = useMemo(() => [...new Set(nodes.map((node) => node.entity_type))].sort(), [nodes]);
+  const present = useMemo(() => [...new Set(shown.map((node) => node.entity_type))].sort(), [shown]);
   const toggleType = (type) => setTypes((current) => (current.includes(type) ? current.filter((item) => item !== type) : [...current, type]));
 
   if (!nodes.length) return <Blank title="No relationships to draw yet" detail="Relationships appear once evidence has been processed and identities resolved. Nothing is drawn that the evidence does not support." />;
@@ -351,6 +440,14 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, height = 520 
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#eadfd3] px-4 py-3">
       <Eyebrow>Relationship map / every edge opens at its source</Eyebrow>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">{Object.keys(RELATION_TONE).map((type) => <span key={type} className="inline-flex items-center gap-1.5 text-[8px] font-bold uppercase tracking-[.06em] text-[#7d7065]"><i className="h-1 w-4 rounded-full" style={{ background: relationTone(type) }} />{readable(type)}</span>)}</div>
+    </div>
+
+    {/* ------------------------------------------------------------ arrangement */}
+    <div className="flex flex-wrap items-center gap-2 border-b border-[#eadfd3] bg-[#fffdf8] px-4 py-2.5">
+      <span className="text-[8px] font-bold uppercase tracking-[.12em] text-[#8a7d71]">Layout</span>
+      {([["force", "Force"], ["tree", "Tree (root top)"], ["radial", "Radial"], ["hierarchy", "Hierarchy"], ["compact", "Compact"]] as const)
+        .map(([value, label]) => <Chip key={value} active={mode === value} onClick={() => setMode(value)}>{label}</Chip>)}
+      <span className="ml-auto text-[8px] leading-4 text-[#9b8d80]">Arrangement only &mdash; no layout changes what the evidence states</span>
     </div>
 
     {/* ------------------------------------------------------------ controls */}
@@ -366,6 +463,8 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, height = 520 
       <button onClick={reset} title="Reset the view and release every pinned node" className="rounded-lg border border-[#ded0c0] bg-white px-2.5 py-1.5 text-[9px] font-bold text-[#6b5b51] transition hover:border-[#bd8177] hover:bg-[#fff5f1]">Reset</button>
       <button onClick={exportJson} className="inline-flex items-center gap-1.5 rounded-lg border border-[#dbcbbd] bg-[#fffaf4] px-2.5 py-1.5 text-[9px] font-bold text-[#8f302b] transition hover:border-[#b36b62] hover:bg-[#fff2ef]"><Download size={11} />Export JSON</button>
     </div>
+
+    {focusId && <p className="border-b border-[#eadfd3] bg-[#f4f8fa] px-4 py-1.5 text-[9px] text-[#3d6070]">Scoped to one subject and the identities directly related to it &mdash; <b>{shown.length}</b> of <b>{nodes.length}</b> in this case. Clear the subject above to see the whole network.</p>}
 
     {matches && <p className="border-b border-[#eadfd3] bg-[#fff8f0] px-4 py-1.5 text-[9px] text-[#6e6258]">{matches.size === 0 ? <>Nothing in this map is written that way. That is a fact about what is drawn, not about the case.</> : <>{matches.size} {matches.size === 1 ? "identity matches" : "identities match"} and {matches.size === 1 ? "is" : "are"} ringed below.</>}</p>}
 
@@ -452,6 +551,127 @@ function NetworkCanvas({ nodes, edges, selected, onSelect, onOpen, height = 520 
  * It moved here when the "Graph" tab was removed. That tab drew no graph, and this was the only
  * thing on it the network view did not already say better.
  */
+/**
+ * Who the map is currently about.
+ *
+ * A whole-case network answers "what does this case contain". An investigator reading one identity
+ * is asking a narrower question -- "what does this number touch" -- and on a case of any size the
+ * first question drowns the second. Choosing a subject scopes the map to that identity and the
+ * identities directly related to it.
+ *
+ * The subject is chosen, never inferred. Nothing here ranks identities or suggests which one to
+ * look at: the list is the case's own entities in alphabetical order.
+ */
+function SubjectBar({ nodes, focusId, onFocus }) {
+  const sorted = useMemo(
+    () => [...nodes].sort((a, b) => String(a.label).localeCompare(String(b.label))),
+    [nodes],
+  );
+  const focused = sorted.find((node) => node.id === focusId) || null;
+
+  return <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[#e8dccf] bg-[#fffdf8] px-4 py-3 shadow-[0_6px_16px_rgba(82,49,36,.05)]">
+    <span className="text-[8px] font-bold uppercase tracking-[.12em] text-[#8a7d71]">Subject</span>
+
+    <div className="relative">
+      <select
+        value={focusId || ""}
+        onChange={(event) => onFocus(event.target.value || null)}
+        className="appearance-none rounded-lg border border-[#ded0c0] bg-white py-1.5 pl-3 pr-8 text-[10px] font-bold text-[#42342c] outline-none transition hover:border-[#bd8177] focus:border-[#bd8177]"
+      >
+        <option value="">Whole case &mdash; every identity</option>
+        {sorted.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
+      </select>
+      <ChevronDown size={12} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[#a0917f]" />
+    </div>
+
+    {focused
+      ? <>
+          <span className="text-[8px] font-bold uppercase tracking-[.12em] text-[#8a7d71]">Type</span>
+          <span className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[8px] font-bold uppercase tracking-[.05em]"
+                style={{ borderColor: entityTone(focused.entity_type), color: entityTone(focused.entity_type), background: "#fffdf8" }}>
+            <i className="h-1.5 w-1.5 rounded-full" style={{ background: entityTone(focused.entity_type) }} />
+            {readable(focused.entity_type)}
+          </span>
+          <Button tone="quiet" onClick={() => onFocus(null)}>Clear subject</Button>
+        </>
+      : <span className="text-[9px] text-[#9b8d80]">Pick one identity to narrow the map to it and what it is directly related to.</span>}
+  </div>;
+}
+
+
+/**
+ * What this case records about the chosen subject, on one card.
+ *
+ * Everything shown is counted from the case's own relationship rows. There is no score and no
+ * ranking: a count of stated relationships is a fact about how much the case holds, and what it
+ * means is the investigator's read.
+ *
+ * The avatar is the identity's initials on its type colour. A photograph would be either a real
+ * person's face or a fabricated one, and neither belongs on a suspect card.
+ */
+function SubjectProfile({ node, summary, onOpenSource, onFocusOther }) {
+  const related = useMemo(() => {
+    const out = new Map();
+    summary.forEach((entry) => {
+      const near = entry.subject?.id === node.id ? entry.object : entry.object?.id === node.id ? entry.subject : null;
+      if (!near?.id) return;
+      const existing = out.get(near.id) || { id: near.id, label: near.label || near.id, type: near.type || "unknown", kinds: new Set(), observations: 0 };
+      existing.kinds.add(entry.relation_type);
+      existing.observations += entry.observation_count || 0;
+      out.set(near.id, existing);
+    });
+    return [...out.values()].sort((a, b) => b.observations - a.observations);
+  }, [summary, node.id]);
+
+  const observations = related.reduce((total, item) => total + item.observations, 0);
+  const initials = String(node.label || "?").split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
+  const tone = entityTone(node.entity_type);
+
+  return <Card className="p-5">
+    <Eyebrow>Subject / assembled from this case&rsquo;s own relationship rows</Eyebrow>
+
+    <div className="mt-3 flex flex-wrap items-center gap-4">
+      <div className="grid h-14 w-14 shrink-0 place-items-center rounded-full text-[15px] font-bold text-white"
+           style={{ background: tone }} aria-hidden>{initials || "?"}</div>
+      <div className="min-w-0">
+        <h3 className="font-serif text-xl font-bold tracking-[-.02em] text-[#2e2520]">{node.label}</h3>
+        <p className="mono mt-1 text-[9px] uppercase tracking-[.08em]" style={{ color: tone }}>{readable(node.entity_type)}</p>
+      </div>
+      <div className="ml-auto flex flex-wrap gap-2">
+        <Pill tone="blue">{related.length} directly related</Pill>
+        <Pill tone="green">{observations} recorded {observations === 1 ? "observation" : "observations"}</Pill>
+      </div>
+    </div>
+
+    {related.length === 0
+      ? <p className="mt-4 text-[9px] leading-5 text-[#8a7d71]">Nothing in this case states a relationship for this identity yet. It is on the map because a source named it, not because anything connects it.</p>
+      : <>
+          <p className="mt-4 text-[8px] font-bold uppercase tracking-[.12em] text-[#8a7d71]">Directly related identities &mdash; click one to make it the subject</p>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {related.slice(0, 9).map((item) => <button
+              key={item.id}
+              type="button"
+              onClick={() => onFocusOther(item.id)}
+              className="rounded-xl border border-[#e6ddd2] bg-[#fffdf8] p-3 text-left transition hover:border-[#bd8177] hover:bg-[#fff5f1]"
+            >
+              <div className="flex items-center gap-2">
+                <i className="h-2 w-2 shrink-0 rounded-full" style={{ background: entityTone(item.type) }} />
+                <span className="truncate text-[10px] font-bold text-[#42342c]">{item.label}</span>
+              </div>
+              <p className="mono mt-1.5 truncate text-[8px] text-[#8a7d71]">{[...item.kinds].map(readable).join(" · ")}</p>
+              <p className="mt-1 text-[8px] text-[#a0917f]">{item.observations} {item.observations === 1 ? "observation" : "observations"}</p>
+            </button>)}
+          </div>
+          {related.length > 9 && <p className="mt-2 text-[8px] text-[#a0917f]">and {related.length - 9} more on the map below.</p>}
+        </>}
+
+    <div className="mt-4 flex flex-wrap gap-2">
+      <Button onClick={onOpenSource}><FileText size={12} />Open where this was read</Button>
+    </div>
+  </Card>;
+}
+
+
 function SharedIdentifiers({ connections }: { connections: GraphRecord["connections"] }) {
   const rows = connections ?? [];
   if (!rows.length) {
@@ -561,6 +781,8 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
   const [minConfidence, setMinConfidence] = useState(0);
   const [typeFilter, setTypeFilter] = useState("");
   const [selectedNode, setSelectedNode] = useState(null);
+  // Which identity the map is about. Null means the whole case.
+  const [focusId, setFocusId] = useState<string | null>(null);
   const [openRelation, setOpenRelation] = useState(null);
   // The panel that shows a statement where it lives in the file it was read from.
   const [sourceRequest, setSourceRequest] = useState(null);
@@ -658,6 +880,14 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
     openEntitySource(nodeId, node?.label ?? "This entity");
   };
 
+  const focusSubject = useMemo(() => canvas.nodes.find((node) => node.id === focusId) || null, [canvas.nodes, focusId]);
+
+  // A subject chosen under one filter can vanish when the filter changes. Holding an id that is
+  // no longer on the map would scope the canvas to nothing and look like a broken page.
+  useEffect(() => {
+    if (focusId && !canvas.nodes.some((node) => node.id === focusId)) setFocusId(null);
+  }, [canvas.nodes, focusId]);
+
   const relationTypes = useMemo(() => [...new Set(data.summary.map((entry) => entry.relation_type))].sort(), [data.summary]);
   const findPath = async () => { try { setPath(await getNetworkPath(caseId, pathFrom, pathTo)); } catch (error) { notify.current(getApiErrorMessage(error, "The path could not be traced.")); } };
 
@@ -688,7 +918,16 @@ export default function NetworkIntelligence({ caseId, say }: { caseId: string; s
       {[0, 0.5, 0.8].map((value) => <Chip key={value} active={minConfidence === value} onClick={() => setMinConfidence(value)}>{value === 0 ? "All" : value.toFixed(1)}</Chip>)}
     </div>
 
-    <NetworkCanvas nodes={canvas.nodes} edges={canvas.edges} selected={selectedNode} onSelect={selectNode} onOpen={openNode} />
+    <SubjectBar nodes={canvas.nodes} focusId={focusId} onFocus={setFocusId} />
+
+    {focusSubject && <SubjectProfile
+      node={focusSubject}
+      summary={data.summary}
+      onOpenSource={() => openEntitySource(focusSubject.id, focusSubject.label)}
+      onFocusOther={(id) => { setFocusId(id); setSelectedNode(null); }}
+    />}
+
+    <NetworkCanvas nodes={canvas.nodes} edges={canvas.edges} selected={selectedNode} onSelect={selectNode} onOpen={openNode} focusId={focusId} />
 
     <div><div className="mb-2 flex items-center gap-2"><Network size={14} className="text-[#8e2d28]" /><Eyebrow>Most important entities / review priority, not guilt</Eyebrow></div>
       {/* The three rankings often agree on who is first and differ only in the score beneath it, and
