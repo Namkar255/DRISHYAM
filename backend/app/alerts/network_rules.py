@@ -63,9 +63,16 @@ def _raise(
     evidence_ids: list[str],
     sequence: list[dict] | None = None,
 ) -> bool:
-    """Record one alert, once. Returns whether it was new."""
+    """Record one alert, once. Returns whether it was new.
+
+    "Once" has to include the inserts this session is already holding. `db.add` does not write, so
+    a second call in the same run reads a table without the pending row, adds a duplicate, and the
+    unique index then rejects the whole batch -- failing the file over a repeated lead.
+    """
     idempotency_key = f"{case_id}:{rule_code}:{NETWORK_RULES_VERSION}:{key}"
     if db.scalar(select(Alert).where(Alert.idempotency_key == idempotency_key)):
+        return False
+    if any(isinstance(pending, Alert) and pending.idempotency_key == idempotency_key for pending in db.new):
         return False
     db.add(
         Alert(
