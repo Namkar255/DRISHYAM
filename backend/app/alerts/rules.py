@@ -18,9 +18,24 @@ from app.models.entities import Alert, Entity, Event, EvidenceFile, Severity, Tr
 
 
 def _alert(db: Session, *, case_id: str, rule_code: str, key: str, severity: Severity, explanation: str, evidence_ids: list[str], event_id: str | None = None, sequence: list[dict] | None = None) -> None:
+    """Record one lead, at most once per case, however many times the rule reaches it.
+
+    The stored-row check alone is not enough. `db.add` only queues the row, so a second call in the
+    same run -- the same recipient reached down two paths, or a file reprocessed after a retry --
+    issues its SELECT against a table that does not hold the pending insert yet, decides the alert
+    is new, and adds it again. Both rows then land in one batch and the unique index rejects the
+    statement, which fails the whole file over a duplicate lead nobody needed.
+
+    So the pending inserts are consulted too. Flushing here instead would work, but it would commit
+    this session's partial work to the transaction on every rule, and a rule deciding when the
+    pipeline's writes become visible is a worse trade than reading the session first.
+    """
     idempotency_key = f"{case_id}:{rule_code}:{key}"
-    if not db.scalar(select(Alert).where(Alert.idempotency_key == idempotency_key)):
-        db.add(Alert(case_id=case_id, rule_code=rule_code, severity=severity, explanation=explanation, affected_evidence_ids=evidence_ids, related_event_id=event_id, sequence=sequence, idempotency_key=idempotency_key))
+    if db.scalar(select(Alert).where(Alert.idempotency_key == idempotency_key)):
+        return
+    if any(isinstance(pending, Alert) and pending.idempotency_key == idempotency_key for pending in db.new):
+        return
+    db.add(Alert(case_id=case_id, rule_code=rule_code, severity=severity, explanation=explanation, affected_evidence_ids=evidence_ids, related_event_id=event_id, sequence=sequence, idempotency_key=idempotency_key))
 
 
 def _transfer_step(transaction: Transaction) -> Step:

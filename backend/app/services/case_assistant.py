@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.evidence_intelligence import patterns
 from app.graph import analytics
-from app.models.entities import Alert, Entity, EntityRelation, EvidenceFile, NormalizedRecord
+from app.models.entities import Alert, Entity, EntityRelation, Event, EvidenceFile, NormalizedRecord
 from app.services import temporal
 from app.services.relationship_builder import RELATION_MEANING, relation_summary
 
@@ -108,8 +108,113 @@ INTENT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+# A clock time as a person writes one: 21:45, 21.45, 9:15 pm, "2145 hrs".
+#
+# Anchored on a word boundary and requiring a separator or an explicit "hrs"/am/pm, because a bare
+# four-digit run in a case like this is far more likely to be part of an account number or a
+# transaction reference than a time of day.
+_CLOCK = re.compile(
+    r"\b(?:([01]?\d|2[0-3])\s*[:.]\s*([0-5]\d)\s*(am|pm)?|([01]?\d|2[0-3])([0-5]\d)\s*(?:hrs?|hours))\b",
+    re.I,
+)
+
+
+def _clock_times(question: str) -> list[str]:
+    """Every time of day the question names, normalised to HH:MM on a 24-hour clock."""
+    found: list[str] = []
+    for match in _CLOCK.finditer(question):
+        if match.group(1) is not None:
+            hour, minute, meridiem = int(match.group(1)), match.group(2), (match.group(3) or "").lower()
+        else:
+            hour, minute, meridiem = int(match.group(4)), match.group(5), ""
+        if meridiem == "pm" and hour < 12:
+            hour += 12
+        if meridiem == "am" and hour == 12:
+            hour = 0
+        value = f"{hour:02d}:{minute}"
+        if value not in found:
+            found.append(value)
+    return found
+
+
+def _time_written_forms(value: str) -> tuple[str, ...]:
+    """The ways one time could be written in a source, so a text search finds it however it was typed."""
+    hour, minute = value.split(":")
+    short = f"{int(hour)}:{minute}"
+    return tuple(dict.fromkeys((value, short, value.replace(":", "."), short.replace(":", "."), f"{hour}{minute}")))
+
+
+def _answer_at_time(db: Session, case_id: str, times: list[str]) -> tuple[str, list[Finding]]:
+    """What this case records at a named time of day.
+
+    The clock time is read out of the source text, not out of `occurred_at`. In this data the
+    stored timestamp carries the date at day precision and no clock at all, so a time of day exists
+    here only as something a document wrote down. Answering from the stored field would either find
+    nothing or, worse, imply the system had established a time it has not.
+
+    So the text is searched, the match is quoted, and the file it came from is named. When two
+    sources put the same event at different times both are returned and neither is preferred --
+    that disagreement is the thing an investigator most needs to see, and resolving it is theirs.
+    """
+    events = db.scalars(select(Event).where(Event.case_id == case_id)).all()
+    names = dict(db.execute(select(EvidenceFile.id, EvidenceFile.original_name).where(EvidenceFile.case_id == case_id)).all())
+
+    findings: list[Finding] = []
+    per_time: dict[str, set[str]] = {}
+    for value in times:
+        forms = _time_written_forms(value)
+        for event in events:
+            haystack = " ".join(filter(None, (event.original_time, event.description)))
+            if not any(form in haystack for form in forms):
+                continue
+            source = names.get(event.source_file_id, "an unnamed file")
+            per_time.setdefault(value, set()).add(source)
+            findings.append(
+                Finding(
+                    statement=f"{event.event_type.replace('_', ' ')} recorded in {source}, written as {value}",
+                    evidence_ids=[event.source_file_id] if event.source_file_id else [],
+                    verification_status=event.review_status.value if hasattr(event.review_status, "value") else str(event.review_status),
+                    quoted_source_text=(event.description or "")[:400] or None,
+                )
+            )
+
+    if not findings:
+        asked = ", ".join(times)
+        return (
+            f"Nothing in this case is written at {asked}. That is a statement about what the sources "
+            "record, not about what happened: a time nobody wrote down is not a time this case can place.",
+            [],
+        )
+
+    parts = []
+    for value in times:
+        sources = sorted(per_time.get(value, ()))
+        if sources:
+            parts.append(f"{value} appears in {', '.join(sources)}")
+    lead = "; ".join(parts) if parts else ""
+
+    spread = sorted({name for names_at in per_time.values() for name in names_at})
+    disagreement = ""
+    if len(times) == 1 and len(spread) > 1:
+        disagreement = (
+            f" {len(spread)} different files write this time, and every reading is kept as its source "
+            "gave it."
+        )
+
+    return (
+        f"{lead}.{disagreement} These times are quoted from the documents; this case stores the date "
+        "to the day and does not establish a clock time of its own.",
+        findings[:12],
+    )
+
+
 def _detect_intent(question: str, matched: list[Entity]) -> str:
     lowered = question.lower()
+    # A named time of day decides the question before any keyword does. "What happened at 21:45"
+    # carries no word from the keyword table, and "when was the call at 21:45" carries a chronology
+    # word while plainly asking about that one time.
+    if _clock_times(question):
+        return "time"
     for intent, keywords in INTENT_KEYWORDS:
         if any(keyword in lowered for keyword in keywords):
             # "connection" needs two things to connect; otherwise it is a question about one entity.
@@ -481,7 +586,9 @@ def ask(db: Session, case_id: str, question: str) -> Answer:
     matched, unresolved = _match_entities(db, case_id, terms, question)
     intent = _detect_intent(question, matched)
 
-    if intent == "connection" and len(matched) >= 2:
+    if intent == "time":
+        text, findings = _answer_at_time(db, case_id, _clock_times(question))
+    elif intent == "connection" and len(matched) >= 2:
         text, findings = _answer_connection(db, case_id, matched)
     elif intent == "entity" and matched:
         text, findings = _answer_entity(db, case_id, matched[0])

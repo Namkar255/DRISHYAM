@@ -84,14 +84,32 @@ HANDSET_ALONE = "358240052222220"
 
 
 def _font(size: int, *, bold: bool = False):
+    """A real scalable face, or the generator silently produces a different benchmark.
+
+    The fallback is not a cosmetic downgrade. `load_default()` returns a small bitmap face that
+    ignores `size`, so a screenshot built on it carries text a fraction of the intended height --
+    and the blurred screenshot, whose whole job is to be degraded but still readable, comes out
+    with no recoverable text at all. That file then fails ingest instead of being marked a
+    degraded source, and the benchmark quietly measures something else.
+
+    So the Windows and macOS paths are listed beside the Linux ones: this script runs on a
+    developer's machine as often as in the container, and both have to produce the same files.
+    """
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
     ]
     for candidate in candidates:
         if Path(candidate).exists():
             return ImageFont.truetype(candidate, size=size)
-    return ImageFont.load_default()
+    raise RuntimeError(
+        "No scalable font found. Install DejaVu (Linux) or run where Arial exists; the bitmap "
+        "fallback produces a benchmark that does not match the one this script documents."
+    )
 
 
 # --------------------------------------------------------------------------- ground truth
@@ -383,7 +401,7 @@ def generate() -> dict[str, Path]:
         "fir_supplementary": _fir_supplementary(),
         "screenshot_plain": _screenshot("screenshot_plain_synthetic", dark=False, blur=0.0),
         "screenshot_dark": _screenshot("screenshot_dark_synthetic", dark=True, blur=0.0),
-        "screenshot_blurred": _screenshot("screenshot_blurred_synthetic", dark=False, blur=2.6),
+        "screenshot_blurred": _screenshot("screenshot_blurred_synthetic", dark=False, blur=2.0),
         "cdr": _cdr(),
         "transactions": _transactions(),
         "surveillance": _surveillance(),
